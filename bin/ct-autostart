@@ -56,9 +56,11 @@ log "tmux ready: $(tmux -V)"
 # rest can get invalid_grant, and a claude that exits takes its pane, its
 # session, and — if it is the last one — the tmux server with it.
 if [[ -z "${CT_AUTOSTART_NO_WARMUP:-}" ]]; then
-  timeout 90 claude -p 'ok' >/dev/null 2>&1 \
-    && log "credential warm-up ok" \
-    || log "credential warm-up failed (continuing anyway)"
+  if timeout 90 claude -p 'ok' >/dev/null 2>&1; then
+    log "credential warm-up ok"
+  else
+    log "credential warm-up failed (continuing anyway)"
+  fi
 fi
 
 started=0; skipped=0; failed=0
