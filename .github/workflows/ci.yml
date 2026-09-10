@@ -1,0 +1,18 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install bats + shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bats shellcheck
+      - name: lint
+        run: |
+          bash -n bin/ct bin/ct-autostart bin/ensure-nix install.sh
+          shellcheck -x bin/ct bin/ct-autostart bin/ensure-nix install.sh
+      - name: test
+        run: bats tests/

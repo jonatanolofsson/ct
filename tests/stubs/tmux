@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# tmux stub: records every invocation, answers from a fixture state file.
+# State (env):
+#   TMUX_STUB_LOG        file to append argv lines to (required)
+#   TMUX_STUB_SESSIONS   file listing existing session names, one per line
+#   TMUX_STUB_WS         value returned for @ct_workspace show-option
+#   TMUX_STUB_ORIGIN     value returned for @ct_origin show-option
+echo "$*" >> "${TMUX_STUB_LOG:?}"
+case "$1" in
+  -V) echo "tmux 3.5a"; exit 0 ;;
+  has-session)
+    # -t =name  → exact match against the sessions fixture (strip '=')
+    name="${3#=}"
+    [ -f "${TMUX_STUB_SESSIONS:-/dev/null}" ] && grep -qxF "$name" "$TMUX_STUB_SESSIONS" && exit 0
+    exit 1 ;;
+  show-option)
+    case "$*" in
+      *@ct_workspace*) [ -n "${TMUX_STUB_WS:-}" ] && echo "$TMUX_STUB_WS" ;;
+      *@ct_origin*)    [ -n "${TMUX_STUB_ORIGIN:-}" ] && echo "$TMUX_STUB_ORIGIN" ;;
+    esac
+    exit 0 ;;
+  new-session)
+    # register the -s name in the sessions fixture so later has-session sees it
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "-s" ]; then echo "$a" >> "${TMUX_STUB_SESSIONS:-/dev/null}"; fi
+      prev="$a"
+    done
+    exit 0 ;;
+  set-option|rename-session|attach-session) exit 0 ;;
+  *) exit 0 ;;
+esac

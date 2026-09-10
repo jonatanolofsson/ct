@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# sudo stub: never escalate in tests; pretend package operations succeed.
+echo "sudo $*" >> "${SUDO_STUB_LOG:-/dev/null}"
+exit 0
