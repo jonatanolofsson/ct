@@ -54,7 +54,7 @@ name="claude-$(printf '%s' "${workspace##*/}" | tr -c 'A-Za-z0-9_-' '-')"
 
 # One-time migration off the old trailing-dash names, so a session started by the
 # previous version of this script is adopted instead of orphaned. Only the exact
-# workspace-plus-dash form is claimed; old per-repo names (claude-edgelab-root-)
+# workspace-plus-dash form is claimed; old per-repo names (e.g. claude-myrepo-)
 # are deliberately left alone because they are ambiguous across workspaces.
 if ! tmux has-session -t "=$name" 2>/dev/null && tmux has-session -t "=$name-" 2>/dev/null; then
   tmux rename-session -t "=$name-" "$name"
