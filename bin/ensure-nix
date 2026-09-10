@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# ensure-nix — install nix and start its daemon if absent. Idempotent.
+set -uo pipefail
+log() { printf '%s ensure-nix: %s\n' "$(date -Is)" "$*"; }
+PROFILE=/nix/var/nix/profiles/default
+
+if [[ ! -x "$PROFILE/bin/nix" ]]; then
+  log "no nix store — installing (overlay is wiped on every pod restart)"
+  if timeout 300 curl -fsSL https://install.determinate.systems/nix -o /tmp/nix-install.sh; then
+    timeout 900 sudo sh /tmp/nix-install.sh install linux --no-confirm --init none 2>&1 \
+      | tail -5 | sed 's/^/    /'
+  else
+    log "installer download failed — nix unavailable this boot"
+  fi
+fi
+[[ -x "$PROFILE/bin/nix" ]] || { log "nix still missing, giving up"; exit 1; }
+
+# No systemd, so the daemon is ours to start. Same call .bashrc makes for
+# interactive shells; done here too because a tmux pane running claude
+# directly never sources .bashrc.
+if ! pgrep -x nix-daemon >/dev/null 2>&1; then
+  sudo sh -c "nohup $PROFILE/bin/nix-daemon >/var/log/nix-daemon.log 2>&1 &"
+  for _ in $(seq 1 20); do pgrep -x nix-daemon >/dev/null 2>&1 && break; sleep 1; done
+fi
+pgrep -x nix-daemon >/dev/null 2>&1 || { log "daemon failed to start"; exit 1; }
+log "ready: $("$PROFILE/bin/nix" --version 2>/dev/null)"

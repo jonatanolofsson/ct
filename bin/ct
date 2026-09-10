@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# ct — launch or reattach a tmux'd Claude Code session for the current WORKSPACE.
+#
+# BOTH names come from the workspace: the tmux session name, and the Claude
+# session display name passed as `claude --name`. Neither depends on the directory
+# you happen to be standing in, so `ct` reaches the same agent from the workspace
+# root or from any repo clone inside it. That is also what keeps workspaces apart:
+# when several workspaces hold a clone of the SAME repo, naming from the current
+# directory collided them all onto one session (and one agent).
+#
+# tmux daemonizes, so the session survives closing this terminal, a code-server
+# window reload, and extension-host recycles. Only a POD restart stops it — and
+# the conversation is saved to disk, so after a restart resume with:  ct --continue
+#
+# Usage:
+#   cd ~/workspaces/<repo>          # or ~/dev/<session>[/<repo>] — anywhere inside
+#   ct                              # start here, or reattach if already running
+#   ct --continue                   # (first launch only) resume the last conversation
+#   Detach, leave it running:       Ctrl-b  then  d
+#   List running sessions:          tmux ls
+#   Reattach explicitly:            tmux attach -t =<name>     # '=' means exact
+set -euo pipefail
+
+# A workspace is one directory directly under a workspace root: ~/dev/<session>
+# for multi-repo agent sessions, ~/workspaces/<repo> for the curated clones this
+# pod checks out on boot. Set CT_WORKSPACE_ROOT to override with a single root.
+if [[ -n "${CT_WORKSPACE_ROOT:-}" ]]; then
+  ws_roots=("$CT_WORKSPACE_ROOT")
+else
+  ws_roots=("$HOME/dev" "$HOME/workspaces")
+fi
+
+# tmux lives in the ephemeral container layer; self-heal after a pod restart.
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "ct: tmux missing (pod was restarted) — installing once..." >&2
+  sudo apt-get update -qq && sudo apt-get install -y -qq tmux
+fi
+
+# Session identity = the workspace directory. Under no root there is no workspace
+# to name it after, so fall back to the current directory.
+workspace="$PWD"
+for root in "${ws_roots[@]}"; do
+  if [[ "$PWD" == "$root"/* ]]; then
+    rel="${PWD#"$root"/}"
+    workspace="$root/${rel%%/*}"
+    break
+  fi
+done
+
+# printf, not `basename`: basename emits a trailing newline, which this tr (a
+# COMPLEMENT class — every character outside the set is replaced) turned into a
+# stray '-' on the end of every session name.
+name="claude-$(printf '%s' "${workspace##*/}" | tr -c 'A-Za-z0-9_-' '-')"
+
+# One-time migration off the old trailing-dash names, so a session started by the
+# previous version of this script is adopted instead of orphaned. Only the exact
+# workspace-plus-dash form is claimed; old per-repo names (claude-edgelab-root-)
+# are deliberately left alone because they are ambiguous across workspaces.
+if ! tmux has-session -t "=$name" 2>/dev/null && tmux has-session -t "=$name-" 2>/dev/null; then
+  tmux rename-session -t "=$name-" "$name"
+  echo "ct: adopted legacy session '$name-' as '$name'" >&2
+fi
+
+if tmux has-session -t "=$name" 2>/dev/null; then
+  # '=' forces an EXACT match. Without it tmux falls back to prefix matching, so
+  # `ct` in agent-truckbed would attach to the agent running in agent-truckbed-2.
+  # Only has-session/attach-session accept '='; show-option and set-option reject
+  # it outright ("no such session") and take the bare name, which is safe here
+  # because the exact-match check above has already run.
+  session_ws="$(tmux show-option -qv -t "$name" @ct_workspace 2>/dev/null || true)"
+  if [[ -n "$session_ws" && "$session_ws" != "$workspace" ]]; then
+    echo "ct: refusing to attach — session '$name' belongs to $session_ws, not $workspace" >&2
+    echo "ct: rename one of the workspaces, or attach deliberately with: tmux attach -t '=$name'" >&2
+    exit 1
+  fi
+  if (($#)); then
+    echo "ct: '$name' is already running — arguments ($*) apply only at first launch, ignoring" >&2
+  fi
+  origin="$(tmux show-option -qv -t "$name" @ct_origin 2>/dev/null || true)"
+  if [[ -n "${CT_DETACH:-}" ]]; then
+    echo "ct: '$name' already running${origin:+ (started in $origin)} — detached, not attaching" >&2
+    exit 0
+  fi
+  echo "ct: attaching to '$name'${origin:+ (started in $origin)}" >&2
+  exec tmux attach-session -t "=$name"
+fi
+
+# Quote arguments individually; the previous "claude ${*:-}" form word-split any
+# argument containing spaces.
+cmd="claude"
+
+# Name the CLAUDE session after the workspace as well. Without -n every session
+# gets a random adjective-noun pair ("frolicking-prism"), which is what makes a
+# dozen parallel workspaces indistinguishable in the prompt box, the /resume
+# picker and the terminal title. An explicit -n/--name from the caller wins.
+named=0
+for a in "$@"; do
+  case "$a" in -n|--name|--name=*) named=1 ;; esac
+done
+if ((named == 0)); then
+  cmd+=" --name $(printf '%q' "${workspace##*/}")"
+fi
+
+if (($#)); then
+  cmd+=" $(printf '%q ' "$@")"
+fi
+
+tmux new-session -d -s "$name" -c "$PWD" "$cmd"
+tmux set-option -t "$name" @ct_workspace "$workspace" >/dev/null
+tmux set-option -t "$name" @ct_origin "$PWD" >/dev/null
+
+# CT_DETACH=1: create the session and return, instead of attaching. This is
+# what lets a boot script call ct — `tmux attach` needs a controlling TTY and
+# the pod's PID 1 has none (no TERM in its environ at all).
+#
+# An env var, deliberately not a flag: unrecognised arguments are forwarded
+# verbatim to claude below, and `-d` there means --debug. `ct -d` would land
+# `claude --name X -d --continue` on the command line and claude would reject
+# it — which, with remain-on-exit off, closes the pane and destroys the
+# evidence.
+if [[ -n "${CT_DETACH:-}" ]]; then
+  echo "ct: started '$name' detached (attach with: tmux attach -t '=$name')" >&2
+  exit 0
+fi
+exec tmux attach-session -t "=$name"

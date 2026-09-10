@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# ct-autostart — reattach a detached Claude session for every workspace that
+# has a saved conversation. Safe to run by hand at any time; it is what the pod
+# runs ~45s after boot.
+#
+# Opt-in per user, by a file on the PVC:  touch ~/.ct-autostart
+# Kill switch, wins over the above:       touch ~/.ct-noautostart
+#
+# No `set -e`: one bad workspace must not stop the other eleven.
+set -uo pipefail
+
+log() { printf '%s ct-autostart: %s\n' "$(date -Is)" "$*"; }
+
+[[ -e "$HOME/.ct-noautostart" ]] && { log "disabled by ~/.ct-noautostart"; exit 0; }
+if [[ -z "${CT_AUTOSTART_FORCE:-}" && ! -e "$HOME/.ct-autostart" ]]; then
+  log "not enabled (touch ~/.ct-autostart to opt in); doing nothing"
+  exit 0
+fi
+
+# tmux is NOT in the image — it is installed at runtime and lives on the
+# container overlay, so every pod restart loses it. Prefer .debs cached on the
+# PVC: at boot /var/lib/apt/lists is empty, so a bare `apt-get install` fails
+# "Unable to locate package" and a full `apt-get update` must re-fetch three
+# Debian indices over the network. Everything tmux needs except libjemalloc2 is
+# already in the base image.
+# `command -v tmux` is NOT a readiness check, and using one cost this script its
+# first real boot (2026-08-23 20:21). dpkg unpacked tmux but could not CONFIGURE
+# it: libevent-core-2.1-7t64 was missing from the cache, because the dependency
+# closure had been derived on a pod where an earlier runtime `apt-get install
+# tmux` had already pulled libevent in — so it looked like a base-image package
+# when it was not. /usr/bin/tmux existed, `command -v` said yes, and all twelve
+# launches failed. Actually RUN tmux, and repair a half-configured dpkg state
+# instead of leaving it to poison the next apt call.
+tmux_ok() { command -v tmux >/dev/null 2>&1 && tmux -V >/dev/null 2>&1; }
+
+if ! tmux_ok; then
+  if compgen -G "$HOME/.cache/debs/*.deb" >/dev/null; then
+    log "tmux not usable — installing from the PVC cache"
+    sudo dpkg -i "$HOME"/.cache/debs/*.deb 2>&1 | tail -3 | sed 's/^/    dpkg: /'
+    tmux_ok || {
+      log "dpkg left it unconfigured — repairing dependencies"
+      timeout 180 sudo apt-get -y --fix-broken install 2>&1 | tail -3 | sed 's/^/    fix-broken: /'
+    }
+  fi
+fi
+if ! tmux_ok; then
+  log "tmux still not usable — falling back to apt (needs egress)"
+  timeout 180 sudo apt-get update -qq 2>&1 | tail -2 | sed 's/^/    apt: /'
+  timeout 180 sudo apt-get install -y -qq tmux 2>&1 | tail -3 | sed 's/^/    apt: /'
+fi
+tmux_ok || { log "no working tmux — cannot start any session, giving up"; exit 1; }
+log "tmux ready: $(tmux -V)"
+
+# One warm-up before the herd. Twelve agents starting at once would each try to
+# refresh the same rotating OAuth token within seconds; the first wins and the
+# rest can get invalid_grant, and a claude that exits takes its pane, its
+# session, and — if it is the last one — the tmux server with it.
+if [[ -z "${CT_AUTOSTART_NO_WARMUP:-}" ]]; then
+  timeout 90 claude -p 'ok' >/dev/null 2>&1 \
+    && log "credential warm-up ok" \
+    || log "credential warm-up failed (continuing anyway)"
+fi
+
+started=0; skipped=0; failed=0
+for ws in "$HOME"/dev/agent-*/; do
+  ws=${ws%/}
+  [[ -d $ws ]] || continue
+  base=${ws##*/}
+
+  # Transcript check. Claude keys project dirs by cwd with slashes turned into
+  # hyphens, so these names START WITH A HYPHEN: ls/find/stat parse that as an
+  # option and silently return nothing, which would skip every workspace and
+  # report success. Bash globs only.
+  key="$HOME/.claude/projects/${ws//\//-}"
+  if ! compgen -G "$key/*.jsonl" >/dev/null; then
+    log "$base: no transcript — skipping"; skipped=$((skipped+1)); continue
+  fi
+
+  # Idempotent: re-running must not double-start anything. Note this exits 1
+  # with "no server running" when the tmux server is absent, which is exactly
+  # the state at boot — so it must not be treated as an error.
+  if tmux has-session -t "=claude-$base" 2>/dev/null; then
+    log "$base: already running — skipping"; skipped=$((skipped+1)); continue
+  fi
+
+  # --continue, never bare: a bare `ct` starts a FRESH conversation and the
+  # context is gone. ct is `set -euo pipefail`, so tolerate a non-zero exit and
+  # record which workspace it was.
+  # Capture ct's output instead of discarding it. The first real boot logged
+  # "FAILED to start" twelve times with no reason attached, because this line
+  # sent stderr to /dev/null — the same silent-failure shape the rest of this
+  # script is written to avoid.
+  if out=$( cd "$ws" && CT_DETACH=1 ct --continue 2>&1 ); then
+    log "$base: started"; started=$((started+1))
+  else
+    log "$base: FAILED — ${out//$'\n'/ | }"; failed=$((failed+1))
+  fi
+  sleep "${CT_AUTOSTART_STAGGER:-10}"
+done
+
+log "done — started=$started skipped=$skipped failed=$failed"
+[[ $failed -eq 0 ]]
