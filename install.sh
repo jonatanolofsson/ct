@@ -41,7 +41,9 @@ else
         -o "$tmp/ct.tar.gz"
     tar -xzf "$tmp/ct.tar.gz" -C "$tmp"
     srcdir="$(find "$tmp" -maxdepth 1 -type d -name 'ct-*' | head -1)"
-    [ -n "$srcdir" ] && [ -f "$srcdir/bin/ct" ] || { say "payload missing bin/ct — aborting, nothing changed"; exit 1; }
+    if [ -z "$srcdir" ] || [ ! -f "$srcdir/bin/ct" ]; then
+        say "payload missing bin/ct — aborting, nothing changed"; exit 1
+    fi
 fi
 
 # --- 1. binaries (replace only on success; old copies survive any failure) --
