@@ -82,3 +82,53 @@ run_ct() { ( cd "$1" && shift && run_from="$PWD" "$REPO/bin/ct" "$@" ); }
   run bash -c "cd '$HOME/dev/agent-alpha' && '$REPO/bin/ct'"
   grep -q -- 'rename-session -t =claude-agent-alpha- claude-agent-alpha' "$TMUX_STUB_LOG"
 }
+
+# --- auto-resume (2026-09-11 regression: a dead session must not come back empty)
+
+mkts() { # workspace, session-id, lines
+  local key="$HOME/.claude/projects/${1//\//-}"
+  mkdir -p "$key"
+  local i; : > "$key/$2.jsonl"
+  for ((i=0;i<$3;i++)); do echo '{"type":"user"}' >> "$key/$2.jsonl"; done
+}
+
+@test "resumes the workspace transcript by id instead of starting fresh" {
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  grep -q -- '--resume aaaaaaaa-1111' "$TMUX_STUB_LOG"
+}
+
+@test "a stub transcript does not hijack the resume" {
+  mkts "$HOME/dev/agent-alpha" "real-0000" 500
+  sleep 1
+  mkts "$HOME/dev/agent-alpha" "stub-9999" 3      # newer, but tiny
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  grep -q -- '--resume real-0000' "$TMUX_STUB_LOG"
+  ! grep -q -- 'stub-9999' "$TMUX_STUB_LOG"
+}
+
+@test "the newest substantive transcript wins over an older one" {
+  mkts "$HOME/dev/agent-alpha" "old-1111" 900
+  sleep 1
+  mkts "$HOME/dev/agent-alpha" "new-2222" 120
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  grep -q -- '--resume new-2222' "$TMUX_STUB_LOG"
+}
+
+@test "CT_FRESH=1 starts a new conversation despite a transcript" {
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200
+  ( cd "$HOME/dev/agent-alpha" && CT_FRESH=1 "$REPO/bin/ct" )
+  ! grep -q -- '--resume' "$TMUX_STUB_LOG"
+}
+
+@test "caller's own --continue is not doubled with --resume" {
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" --continue )
+  ! grep -q -- '--resume' "$TMUX_STUB_LOG"
+  grep -q -- '--continue' "$TMUX_STUB_LOG"
+}
+
+@test "no transcript at all: plain fresh start, no --resume" {
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  ! grep -q -- '--resume' "$TMUX_STUB_LOG"
+}

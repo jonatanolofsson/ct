@@ -85,14 +85,16 @@ for ws in "$HOME"/dev/agent-*/; do
     log "$base: already running — skipping"; skipped=$((skipped+1)); continue
   fi
 
-  # --continue, never bare: a bare `ct` starts a FRESH conversation and the
-  # context is gone. ct is `set -euo pipefail`, so tolerate a non-zero exit and
-  # record which workspace it was.
+  # No --continue here any more: ct resumes the workspace's best transcript BY
+  # ID on its own (see ct_pick_session). `--continue` only ever meant "most
+  # recent in this directory", which silently prefers a stub left behind by an
+  # accidental fresh start — exactly the failure this loop must not automate
+  # across a whole fleet at boot.
   # Capture ct's output instead of discarding it. The first real boot logged
   # "FAILED to start" twelve times with no reason attached, because this line
   # sent stderr to /dev/null — the same silent-failure shape the rest of this
   # script is written to avoid.
-  if out=$( cd "$ws" && CT_DETACH=1 ct --continue 2>&1 ); then
+  if out=$( cd "$ws" && CT_DETACH=1 ct 2>&1 ); then
     log "$base: started"; started=$((started+1))
   else
     log "$base: FAILED — ${out//$'\n'/ | }"; failed=$((failed+1))

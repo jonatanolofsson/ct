@@ -89,6 +89,45 @@ fi
 # argument containing spaces.
 cmd="claude"
 
+# Resume the workspace's conversation by DEFAULT. Starting fresh is what people
+# almost never mean after the session died — and it dies for mundane reasons: a
+# claude auto-update, a crash, /exit. The pane's command ends, tmux drops the
+# session, and the next `ct` used to open an empty conversation on top of a
+# perfectly good transcript. (Observed 2026-09-11: an auto-update to 2.1.268
+# ended agent-llm's session; the following `ct` started blank.)
+#
+# Pick by ID, not `--continue`. `--continue` means "most recent in this
+# directory", so one accidental fresh session becomes the most recent and every
+# later resume — including the one ct-autostart does after a reboot — silently
+# lands on the stub instead of the real history. Choose the most recent
+# transcript with real content and resume it explicitly.
+#
+# Transcript dirs are the cwd with '/' turned into '-', so they START WITH A
+# HYPHEN: ls/find/stat parse that as an option. Bash globs only.
+ct_pick_session() {
+  local dir="$1" min="${CT_MIN_LINES:-50}" key best=""
+  key="$HOME/.claude/projects/${dir//\//-}"
+  compgen -G "$key/*.jsonl" >/dev/null 2>&1 || return 1
+  # newest first; take the first one that is more than a stub
+  while IFS= read -r f; do
+    if [[ $(wc -l < "$f") -ge $min ]]; then best="$f"; break; fi
+  done < <(ls -t "$key"/*.jsonl 2>/dev/null)
+  [[ -n "$best" ]] || return 1
+  # the filename without .jsonl IS the session id `claude --resume` accepts
+  basename "$best" .jsonl
+}
+
+resuming=0
+for a in "$@"; do
+  case "$a" in -c|--continue|-r|--resume|--resume=*|--fork-session) resuming=1 ;; esac
+done
+if ((resuming == 0)) && [[ -z "${CT_FRESH:-}" ]]; then
+  if sid="$(ct_pick_session "$workspace")"; then
+    cmd+=" --resume $(printf '%q' "$sid")"
+    echo "ct: resuming $sid (CT_FRESH=1 for a new conversation)" >&2
+  fi
+fi
+
 # Name the CLAUDE session after the workspace as well. Without -n every session
 # gets a random adjective-noun pair ("frolicking-prism"), which is what makes a
 # dozen parallel workspaces indistinguishable in the prompt box, the /resume
