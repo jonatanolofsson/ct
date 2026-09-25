@@ -89,7 +89,8 @@ mkdir -p "$HOME/.local/share/ct"
 # Record the resolved commit next to the ref: a checkout run on `main` would
 # otherwise overwrite a fleet's version signal with just "main".
 commit="unknown"
-if [ -d "$srcdir/.git" ] && command -v git >/dev/null 2>&1; then
+# rev-parse, not `[ -d .git ]`: in a worktree or submodule .git is a FILE.
+if command -v git >/dev/null 2>&1 && git -C "$srcdir" rev-parse --git-dir >/dev/null 2>&1; then
     commit="$(git -C "$srcdir" rev-parse --short HEAD 2>/dev/null || echo unknown)"
     [ -n "$(git -C "$srcdir" status --porcelain 2>/dev/null)" ] && commit="$commit-dirty"
 fi

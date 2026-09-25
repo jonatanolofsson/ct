@@ -149,7 +149,7 @@ fi
 # up under the workspace root. Starting in $PWD meant a `ct` run from inside a
 # repo clone wrote its transcript under the repo path while resuming from the
 # workspace path: two keys for one agent, and the next resume missing the
-# conversation. One start directory gives one key.  still records
+# conversation. One start directory gives one key. @ct_origin still records
 # where ct was run, for the attach message.
 tmux new-session -d -s "$name" -c "$workspace" "$cmd"
 tmux set-option -t "$name" @ct_workspace "$workspace" >/dev/null

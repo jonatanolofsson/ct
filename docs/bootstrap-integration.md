@@ -84,3 +84,8 @@ already installed once will silently miss transitive dependencies.
 | `claude` CLI installed + credentials present | `ct-autostart` refuses to start agents that would die on missing login |
 | tmux installable (apt, cached .debs, or nix) | sessions live in tmux |
 | Persistent `$HOME` | transcripts, workspaces and installed copies must survive restarts |
+
+**Note on `--loop`:** it restarts any managed workspace whose session is gone —
+including an agent someone ended on purpose with `/exit`. To retire an agent,
+remove or rename its workspace directory (or touch `~/.ct-noautostart` to stop
+the loop altogether); exiting the session alone is undone within one interval.
