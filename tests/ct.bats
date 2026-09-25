@@ -22,6 +22,13 @@ run_ct() { ( cd "$1" && shift && run_from="$PWD" "$REPO/bin/ct" "$@" ); }
   ! grep -q -- 'claude-repo-x' "$TMUX_STUB_LOG"
 }
 
+@test "claude starts at the workspace root even when ct runs inside a repo" {
+  ( cd "$HOME/dev/agent-alpha/repo-x" && "$REPO/bin/ct" )
+  # one start dir means one transcript key for the agent, whichever clone ct ran in
+  grep -q -- "-c $HOME/dev/agent-alpha " "$TMUX_STUB_LOG"
+  ! grep -q -- "-c $HOME/dev/agent-alpha/repo-x " "$TMUX_STUB_LOG"
+}
+
 @test "claude gets --name <workspace> when caller passed no -n" {
   ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
   grep -q -- '--name agent-alpha' "$TMUX_STUB_LOG"

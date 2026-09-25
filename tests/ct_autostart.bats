@@ -68,3 +68,81 @@ setup() {
   [[ "$output" == *"done — started="* ]]
   [ "$status" -eq 0 ]
 }
+
+@test "default discovery is agent-* only" {
+  touch "$HOME/.ct-autostart"
+  mkdir -p "$HOME/dev/plain"; mktranscript "$HOME/dev/plain"; mktranscript "$HOME/dev/agent-one"
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  [[ "$output" == *"agent-one: started"* ]]
+  [[ "$output" != *"plain:"* ]]
+}
+
+@test "CT_AUTOSTART_GLOB widens discovery to plainly named workspaces" {
+  touch "$HOME/.ct-autostart"
+  mkdir -p "$HOME/dev/plain"; mktranscript "$HOME/dev/plain"
+  run env CT_AUTOSTART_GLOB='*' CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"plain: started"* ]]
+}
+
+@test "dot-dirs are never workspaces, even with a transcript" {
+  touch "$HOME/.ct-autostart"
+  mkdir -p "$HOME/dev/.gitcache"; mktranscript "$HOME/dev/.gitcache"
+  run env CT_AUTOSTART_GLOB='*' CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  [[ "$output" != *".gitcache"* ]]
+  ! grep -q -- 'claude-.gitcache' "$TMUX_STUB_LOG"
+}
+
+@test "--restart stops managed sessions and starts them again" {
+  touch "$HOME/.ct-autostart"
+  mktranscript "$HOME/dev/agent-one"
+  echo "claude-agent-one" > "$TMUX_STUB_SESSIONS"
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart" --restart
+  [ "$status" -eq 0 ]
+  grep -q -- 'kill-session -t =claude-agent-one' "$TMUX_STUB_LOG"
+  [[ "$output" == *"agent-one: stopped"* ]]
+  [[ "$output" == *"agent-one: started"* ]]
+}
+
+@test "--restart never kills the session it runs inside" {
+  touch "$HOME/.ct-autostart"
+  mktranscript "$HOME/dev/agent-one"; mktranscript "$HOME/dev/agent-two"
+  printf 'claude-agent-one\nclaude-agent-two\n' > "$TMUX_STUB_SESSIONS"
+  run env TMUX=/tmp/fake,1,0 TMUX_STUB_SELF=claude-agent-two CT_AUTOSTART_NO_WARMUP=1 \
+      "$REPO/bin/ct-autostart" --restart
+  grep -q -- 'kill-session -t =claude-agent-one' "$TMUX_STUB_LOG"
+  ! grep -q -- 'kill-session -t =claude-agent-two' "$TMUX_STUB_LOG"
+  [[ "$output" == *"agent-two: this command runs inside it"* ]]
+}
+
+@test "--restart leaves sessions it does not manage alone" {
+  touch "$HOME/.ct-autostart"
+  printf 'claude-something-else\n' > "$TMUX_STUB_SESSIONS"
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart" --restart
+  ! grep -q -- 'kill-session' "$TMUX_STUB_LOG"
+}
+
+@test "--loop repeats the pass and survives a failed round" {
+  touch "$HOME/.ct-autostart"
+  run env CT_AUTOSTART_NO_WARMUP=1 CT_AUTOSTART_INTERVAL=0.1 \
+      timeout 2 "$REPO/bin/ct-autostart" --loop
+  # timeout ends it; what matters is that more than one round ran
+  [ "$(grep -c 'done —' <<<"$output")" -ge 2 ]
+}
+
+@test "--loop stops when the kill switch appears" {
+  touch "$HOME/.ct-autostart"
+  ( sleep 0.5; touch "$HOME/.ct-noautostart" ) &
+  run env CT_AUTOSTART_NO_WARMUP=1 CT_AUTOSTART_INTERVAL=0.1 \
+      timeout 5 "$REPO/bin/ct-autostart" --loop
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"stopping the loop"* ]]
+}
+
+@test "an unknown argument fails loudly instead of doing a pass" {
+  touch "$HOME/.ct-autostart"
+  run "$REPO/bin/ct-autostart" --lopo
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unknown argument"* ]]
+  ! grep -q new-session "$TMUX_STUB_LOG"
+}

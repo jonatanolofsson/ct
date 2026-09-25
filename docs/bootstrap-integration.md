@@ -55,6 +55,24 @@ must reach its main service before the agents start competing for CPU:
 
     setsid bash -c 'sleep 45; exec ct-autostart >> "$HOME/.ct-autostart.log" 2>&1' &
 
+Two modes worth knowing for a fleet:
+
+- **`ct-autostart --loop`** repeats the pass every `CT_AUTOSTART_INTERVAL` seconds
+  (default 300). A boot-only pass leaves a workspace created after boot without an
+  agent, and a crashed agent dead, until the next pod restart; the pass is
+  idempotent, so re-running it on a timer closes both. The kill switch is re-read
+  every round, so it stops a running loop too. Launch it in place of the one-shot:
+
+      setsid bash -c 'sleep 45; exec ct-autostart --loop >> "$HOME/.ct-autostart.log" 2>&1' &
+
+- **`ct-autostart --restart`** stops every managed session and starts it again —
+  what you want after upgrading `claude`, when every running agent is still the
+  old binary. It never kills the session it is run from.
+
+Workspaces are discovered as `~/dev/agent-*` by default. If your site names them
+plainly (`~/dev/billing`, `~/dev/billing-api`), set `CT_AUTOSTART_GLOB='*'`;
+dot-dirs such as `.gitcache/` are never treated as workspaces.
+
 If your image lacks tmux at boot, pre-cache its .deb closure on the home
 volume (`~/.cache/debs/`) — deriving that closure on a machine where tmux was
 already installed once will silently miss transitive dependencies.

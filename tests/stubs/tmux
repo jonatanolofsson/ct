@@ -5,6 +5,7 @@
 #   TMUX_STUB_SESSIONS   file listing existing session names, one per line
 #   TMUX_STUB_WS         value returned for @ct_workspace show-option
 #   TMUX_STUB_ORIGIN     value returned for @ct_origin show-option
+#   TMUX_STUB_SELF       session name returned by display-message (the caller)
 echo "$*" >> "${TMUX_STUB_LOG:?}"
 case "$1" in
   -V) echo "tmux 3.5a"; exit 0 ;;
@@ -27,6 +28,15 @@ case "$1" in
       prev="$a"
     done
     exit 0 ;;
+  kill-session)
+    # -t =name → drop it from the fixture, so a later has-session sees it gone
+    name="${3#=}"
+    if [ -f "${TMUX_STUB_SESSIONS:-/dev/null}" ]; then
+      grep -vxF "$name" "$TMUX_STUB_SESSIONS" > "$TMUX_STUB_SESSIONS.tmp" || true
+      mv "$TMUX_STUB_SESSIONS.tmp" "$TMUX_STUB_SESSIONS"
+    fi
+    exit 0 ;;
+  display-message) echo "${TMUX_STUB_SELF:-}"; exit 0 ;;
   set-option|rename-session|attach-session) exit 0 ;;
   *) exit 0 ;;
 esac
