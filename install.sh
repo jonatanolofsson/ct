@@ -59,10 +59,22 @@ md="$CT_HOME/CLAUDE.md"
 BEGIN='<!-- BEGIN ct-managed -->'
 END='<!-- END ct-managed -->'
 touch "$md"
-if grep -qF "$BEGIN" "$md"; then
-    sed -i "\|^${BEGIN}\$|,\|^${END}\$|d" "$md"
+# Replace the block IN PLACE when it exists; append only when it does not.
+# Delete-then-append made the block order alternate with any other marker-block
+# writer (e.g. a site layer): whichever ran last ended up at the bottom, so the
+# file churned on every boot although its content never changed.
+block="$(mktemp)"
+{ echo "$BEGIN"; cat "$srcdir/docs/workspace-conventions.md"; echo "$END"; } > "$block"
+if grep -qxF "$BEGIN" "$md"; then
+    awk -v b="$BEGIN" -v e="$END" -v f="$block" '
+        $0 == b { while ((getline l < f) > 0) print l; skip = 1; next }
+        skip && $0 == e { skip = 0; next }
+        !skip
+    ' "$md" > "$md.ct-tmp" && mv "$md.ct-tmp" "$md"
+else
+    cat "$block" >> "$md"
 fi
-{ echo "$BEGIN"; cat "$srcdir/docs/workspace-conventions.md"; echo "$END"; } >> "$md"
+rm -f "$block"
 say "wrote ct-managed block in $md"
 
 # --- 3. settings seed (write-once, never clobber) ---------------------------
@@ -74,5 +86,12 @@ fi
 
 # --- 4. version stamp -------------------------------------------------------
 mkdir -p "$HOME/.local/share/ct"
-printf '%s %s\n' "$CT_REF" "$(date -u +%Y-%m-%dT%H:%MZ)" > "$HOME/.local/share/ct/VERSION"
+# Record the resolved commit next to the ref: a checkout run on `main` would
+# otherwise overwrite a fleet's version signal with just "main".
+commit="unknown"
+if [ -d "$srcdir/.git" ] && command -v git >/dev/null 2>&1; then
+    commit="$(git -C "$srcdir" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    [ -n "$(git -C "$srcdir" status --porcelain 2>/dev/null)" ] && commit="$commit-dirty"
+fi
+printf '%s %s %s\n' "$CT_REF" "$commit" "$(date -u +%Y-%m-%dT%H:%MZ)" > "$HOME/.local/share/ct/VERSION"
 say "done (${CT_REF}). Next: create a workspace under $CT_HOME and run: ct"

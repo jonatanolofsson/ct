@@ -15,7 +15,7 @@ setup() {
   # transcript dir names are the cwd with / -> -  (they START with a hyphen)
   mktranscript() {
     local ws="$1"; local key="$HOME/.claude/projects/${ws//\//-}"
-    mkdir -p "$key" && printf '%s\n' '{"sessionId":"x"}' > "$key/x.jsonl"
+    mkdir -p "$key" && for _ in $(seq 60); do printf "%s\n" "{\"sessionId\":\"x\"}"; done > "$key/x.jsonl"
   }
   export -f mktranscript
 }
@@ -34,13 +34,13 @@ setup() {
   [[ "$output" == *"disabled"* ]]
 }
 
-@test "starts workspaces with transcripts, resumes with --continue" {
+@test "starts workspaces with transcripts, resumes that transcript by id" {
   touch "$HOME/.ct-autostart"
   mktranscript "$HOME/dev/agent-one"
   run env CT_AUTOSTART_FORCE=1 CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
   [ "$status" -eq 0 ]
   [[ "$output" == *"agent-one: started"* ]]
-  grep -q -- '--continue' "$TMUX_STUB_LOG"
+  grep -q -- "--resume x" "$TMUX_STUB_LOG"
 }
 
 @test "idempotent: an already-running session is skipped" {
