@@ -144,7 +144,14 @@ if (($#)); then
   cmd+=" $(printf '%q ' "$@")"
 fi
 
-tmux new-session -d -s "$name" -c "$PWD" "$cmd"
+# Start claude at the WORKSPACE root, never in $PWD. Claude keys its transcript
+# folder on the directory it starts in, and ct_pick_session looks the resume id
+# up under the workspace root. Starting in $PWD meant a `ct` run from inside a
+# repo clone wrote its transcript under the repo path while resuming from the
+# workspace path: two keys for one agent, and the next resume missing the
+# conversation. One start directory gives one key.  still records
+# where ct was run, for the attach message.
+tmux new-session -d -s "$name" -c "$workspace" "$cmd"
 tmux set-option -t "$name" @ct_workspace "$workspace" >/dev/null
 tmux set-option -t "$name" @ct_origin "$PWD" >/dev/null
 

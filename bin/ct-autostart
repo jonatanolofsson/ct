@@ -6,10 +6,30 @@
 # Opt-in per user, by a file on the PVC:  touch ~/.ct-autostart
 # Kill switch, wins over the above:       touch ~/.ct-noautostart
 #
+#   ct-autostart             one idempotent pass (boot, or by hand)
+#   ct-autostart --loop      a pass every CT_AUTOSTART_INTERVAL seconds (300)
+#   ct-autostart --restart   stop every managed session, then start them again
+#
+# Workspaces are the directories under ~/dev matching CT_AUTOSTART_GLOB
+# (default agent-*; set it to * for plainly named workspaces).
+#
 # No `set -e`: one bad workspace must not stop the other eleven.
 set -uo pipefail
 
 log() { printf '%s ct-autostart: %s\n' "$(date -Is)" "$*"; }
+
+# Modes. A plain pass is what boot runs. --loop exists because a boot-only model
+# leaves two holes: a workspace created after boot gets no agent until the next
+# pod restart, and an agent that dies stays dead until then. Re-running the
+# (idempotent) pass on a timer closes both. --restart is for after upgrading
+# claude, when every running agent is still the old binary.
+mode=once
+case "${1:-}" in
+  "")        ;;
+  --loop)    mode=loop ;;
+  --restart) mode=restart ;;
+  *) log "unknown argument '$1' (expected --loop or --restart)"; exit 2 ;;
+esac
 
 [[ -e "$HOME/.ct-noautostart" ]] && { log "disabled by ~/.ct-noautostart"; exit 0; }
 if [[ -z "${CT_AUTOSTART_FORCE:-}" && ! -e "$HOME/.ct-autostart" ]]; then
@@ -63,44 +83,99 @@ if [[ -z "${CT_AUTOSTART_NO_WARMUP:-}" ]]; then
   fi
 fi
 
-started=0; skipped=0; failed=0
-for ws in "$HOME"/dev/agent-*/; do
-  ws=${ws%/}
-  [[ -d $ws ]] || continue
-  base=${ws##*/}
+# Which directories under ~/dev are workspaces. The default keeps the agent-*
+# naming; a site that names workspaces plainly (hus, mgb-ekonomi) sets
+# CT_AUTOSTART_GLOB='*'. Dot-dirs are never workspaces — .gitcache/ lives here —
+# and bash globs skip them anyway, but the explicit check survives `dotglob`.
+workspaces() {
+  local ws
+  # The glob must stay unquoted so it expands.
+  # shellcheck disable=SC2231
+  for ws in "$HOME"/dev/${CT_AUTOSTART_GLOB:-agent-*}/; do
+    ws=${ws%/}
+    [[ -d $ws ]] || continue
+    [[ ${ws##*/} == .* ]] && continue
+    printf '%s\n' "$ws"
+  done
+}
 
-  # Transcript check. Claude keys project dirs by cwd with slashes turned into
-  # hyphens, so these names START WITH A HYPHEN: ls/find/stat parse that as an
-  # option and silently return nothing, which would skip every workspace and
-  # report success. Bash globs only.
-  key="$HOME/.claude/projects/${ws//\//-}"
-  if ! compgen -G "$key/*.jsonl" >/dev/null; then
-    log "$base: no transcript — skipping"; skipped=$((skipped+1)); continue
+# --restart: stop the sessions this script manages and nothing else. Never the
+# session running this command — killing that ends the very agent that asked
+# for the restart, mid-command, before any new session has started.
+stop_managed() {
+  local self="" ws name wss=()
+  if [[ -n "${TMUX:-}" ]]; then
+    self="$(tmux display-message -p '#{session_name}' 2>/dev/null || true)"
   fi
+  mapfile -t wss < <(workspaces)
+  for ws in "${wss[@]}"; do
+    name="claude-${ws##*/}"
+    tmux has-session -t "=$name" 2>/dev/null || continue
+    if [[ $name == "$self" ]]; then
+      log "${ws##*/}: this command runs inside it — leaving it alone"; continue
+    fi
+    tmux kill-session -t "=$name" && log "${ws##*/}: stopped"
+  done
+}
 
-  # Idempotent: re-running must not double-start anything. Note this exits 1
-  # with "no server running" when the tmux server is absent, which is exactly
-  # the state at boot — so it must not be treated as an error.
-  if tmux has-session -t "=claude-$base" 2>/dev/null; then
-    log "$base: already running — skipping"; skipped=$((skipped+1)); continue
-  fi
+run_round() {
+  local ws base key out started=0 skipped=0 failed=0 wss=()
+  # Collected first, not read in a `while read` loop: ct and tmux inside the
+  # loop body would inherit that loop's stdin and could swallow the list.
+  mapfile -t wss < <(workspaces)
+  for ws in "${wss[@]}"; do
+    base=${ws##*/}
 
-  # No --continue here any more: ct resumes the workspace's best transcript BY
-  # ID on its own (see ct_pick_session). `--continue` only ever meant "most
-  # recent in this directory", which silently prefers a stub left behind by an
-  # accidental fresh start — exactly the failure this loop must not automate
-  # across a whole fleet at boot.
-  # Capture ct's output instead of discarding it. The first real boot logged
-  # "FAILED to start" twelve times with no reason attached, because this line
-  # sent stderr to /dev/null — the same silent-failure shape the rest of this
-  # script is written to avoid.
-  if out=$( cd "$ws" && CT_DETACH=1 ct 2>&1 ); then
-    log "$base: started"; started=$((started+1))
-  else
-    log "$base: FAILED — ${out//$'\n'/ | }"; failed=$((failed+1))
-  fi
-  sleep "${CT_AUTOSTART_STAGGER:-10}"
-done
+    # Transcript check. Claude keys project dirs by cwd with slashes turned into
+    # hyphens, so these names START WITH A HYPHEN: ls/find/stat parse that as an
+    # option and silently return nothing, which would skip every workspace and
+    # report success. Bash globs only.
+    key="$HOME/.claude/projects/${ws//\//-}"
+    if ! compgen -G "$key/*.jsonl" >/dev/null; then
+      log "$base: no transcript — skipping"; skipped=$((skipped+1)); continue
+    fi
 
-log "done — started=$started skipped=$skipped failed=$failed"
-[[ $failed -eq 0 ]]
+    # Idempotent: re-running must not double-start anything. Note this exits 1
+    # with "no server running" when the tmux server is absent, which is exactly
+    # the state at boot — so it must not be treated as an error.
+    if tmux has-session -t "=claude-$base" 2>/dev/null; then
+      log "$base: already running — skipping"; skipped=$((skipped+1)); continue
+    fi
+
+    # No --continue here any more: ct resumes the workspace's best transcript BY
+    # ID on its own (see ct_pick_session). `--continue` only ever meant "most
+    # recent in this directory", which silently prefers a stub left behind by an
+    # accidental fresh start — exactly the failure this loop must not automate
+    # across a whole fleet at boot.
+    # Capture ct's output instead of discarding it. The first real boot logged
+    # "FAILED to start" twelve times with no reason attached, because this line
+    # sent stderr to /dev/null — the same silent-failure shape the rest of this
+    # script is written to avoid.
+    if out=$( cd "$ws" && CT_DETACH=1 ct 2>&1 </dev/null ); then
+      log "$base: started"; started=$((started+1))
+    else
+      log "$base: FAILED — ${out//$'\n'/ | }"; failed=$((failed+1))
+    fi
+    sleep "${CT_AUTOSTART_STAGGER:-10}"
+  done
+
+  log "done — started=$started skipped=$skipped failed=$failed"
+  [[ $failed -eq 0 ]]
+}
+
+case "$mode" in
+  once)    run_round ;;
+  restart) stop_managed; run_round ;;
+  loop)
+    interval="${CT_AUTOSTART_INTERVAL:-300}"
+    log "looping every ${interval}s (touch ~/.ct-noautostart to stop)"
+    while :; do
+      # Re-read every round, so the kill switch stops a running loop too.
+      if [[ -e "$HOME/.ct-noautostart" ]]; then
+        log "disabled by ~/.ct-noautostart — stopping the loop"; exit 0
+      fi
+      # A failed start is already logged; the loop must outlive it.
+      run_round || true
+      sleep "$interval"
+    done ;;
+esac
