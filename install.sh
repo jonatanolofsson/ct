@@ -40,6 +40,9 @@ else
         "https://codeload.github.com/jonatanolofsson/ct/tar.gz/refs/heads/${CT_REF}" \
         -o "$tmp/ct.tar.gz"
     tar -xzf "$tmp/ct.tar.gz" -C "$tmp"
+    # GitHub's archives carry the commit in a pax header; without this, curl
+    # mode — what every bootstrap runs — stamped VERSION with "unknown".
+    tarball_commit="$(gzip -dc "$tmp/ct.tar.gz" | git get-tar-commit-id 2>/dev/null | cut -c1-7 || true)"
     srcdir="$(find "$tmp" -maxdepth 1 -type d -name 'ct-*' | head -1)"
     if [ -z "$srcdir" ] || [ ! -f "$srcdir/bin/ct" ]; then
         say "payload missing bin/ct — aborting, nothing changed"; exit 1
@@ -93,6 +96,8 @@ commit="unknown"
 if command -v git >/dev/null 2>&1 && git -C "$srcdir" rev-parse --git-dir >/dev/null 2>&1; then
     commit="$(git -C "$srcdir" rev-parse --short HEAD 2>/dev/null || echo unknown)"
     [ -n "$(git -C "$srcdir" status --porcelain 2>/dev/null)" ] && commit="$commit-dirty"
+elif [ -n "${tarball_commit:-}" ]; then
+    commit="$tarball_commit"
 fi
 printf '%s %s %s\n' "$CT_REF" "$commit" "$(date -u +%Y-%m-%dT%H:%MZ)" > "$HOME/.local/share/ct/VERSION"
 say "done (${CT_REF}). Next: create a workspace under $CT_HOME and run: ct"
