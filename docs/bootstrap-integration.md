@@ -69,6 +69,28 @@ Two modes worth knowing for a fleet:
   what you want after upgrading `claude`, when every running agent is still the
   old binary. It never kills the session it is run from.
 
+- **`ct-autostart --supervise`** runs `--loop` forever and starts it again if it
+  ever exits — the stand-in for a systemd unit in a container that has none. While
+  the kill switch is set or the opt-in is missing it waits (and says so once), so
+  lifting either takes effect within `CT_AUTOSTART_RETRY` seconds (default 30).
+  **Run it in the same container as your main process, not a sidecar:** tmux's
+  server lives in whichever container starts it, so every agent becomes a child of
+  that container, and a sidecar restart would kill them all. Launch it in place of
+  `--loop`:
+
+      setsid bash -c 'sleep 45; exec ct-autostart --supervise >> "$HOME/.ct-autostart.log" 2>&1' &
+
+Every workspace gets an agent: its newest substantive transcript resumed by id,
+or a fresh session if it has none yet (a workspace that was created but never
+prompted). A workspace IS an agent; to retire one, remove its directory.
+
+Every pass also reads the screen of each session that was already running and
+logs `WARNING — running, but …` when it is blank, unreadable, or waiting at a
+prompt (`CT_AUTOSTART_DIALOG_RE`; default: Claude Code's trust, MCP-approval and
+selection dialogs). A session stuck at a dialog looks healthy to every process
+check; this is the only place it shows. The summary line counts them
+(`warned=N`). It only warns — answering a dialog is a person's decision.
+
 Workspaces are discovered as `~/dev/agent-*` by default. If your site names them
 plainly (`~/dev/billing`, `~/dev/billing-api`), set `CT_AUTOSTART_GLOB='*'`;
 dot-dirs such as `.gitcache/` are never treated as workspaces.

@@ -7,6 +7,8 @@ setup() {
   export PATH="$REPO/tests/stubs:$PATH"
   export TMUX_STUB_LOG="$BATS_TEST_TMPDIR/tmux.log"
   export TMUX_STUB_SESSIONS="$BATS_TEST_TMPDIR/sessions"
+  # Not the caller's ct settings: an agent started by ct-autostart has some set.
+  unset CT_AUTOSTART_GLOB CT_WORKSPACE_ROOT CT_FRESH CT_DETACH
   : > "$TMUX_STUB_LOG"; : > "$TMUX_STUB_SESSIONS"
   export HOME="$BATS_TEST_TMPDIR/home"
   mkdir -p "$HOME/dev/agent-alpha/repo-x" "$HOME/dev/agent-alpha-2" "$HOME/elsewhere"

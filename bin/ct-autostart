@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
-# ct-autostart — reattach a detached Claude session for every workspace that
-# has a saved conversation. Safe to run by hand at any time; it is what the pod
-# runs ~45s after boot.
+# ct-autostart — a detached Claude session for every workspace: its saved
+# conversation resumed by id, or a fresh one if it has none yet. Safe to run by
+# hand at any time; it is what the pod runs ~45s after boot.
 #
 # Opt-in per user, by a file on the PVC:  touch ~/.ct-autostart
 # Kill switch, wins over the above:       touch ~/.ct-noautostart
 #
-#   ct-autostart             one idempotent pass (boot, or by hand)
-#   ct-autostart --loop      a pass every CT_AUTOSTART_INTERVAL seconds (300)
-#   ct-autostart --restart   stop every managed session, then start them again
+#   ct-autostart              one idempotent pass (boot, or by hand)
+#   ct-autostart --loop       a pass every CT_AUTOSTART_INTERVAL seconds (300)
+#   ct-autostart --restart    stop every managed session, then start them again
+#   ct-autostart --supervise  run --loop forever, restarting it if it exits
+#
+# Every pass also reads the screen of each session that was already running and
+# logs a WARNING when it is blank or waiting at a prompt: a session stuck at a
+# trust, MCP or effort dialog looks perfectly healthy to every process check.
 #
 # Workspaces are the directories under ~/dev matching CT_AUTOSTART_GLOB
 # (default agent-*; set it to * for plainly named workspaces).
@@ -25,11 +30,40 @@ log() { printf '%s ct-autostart: %s\n' "$(date -Is)" "$*"; }
 # claude, when every running agent is still the old binary.
 mode=once
 case "${1:-}" in
-  "")        ;;
-  --loop)    mode=loop ;;
-  --restart) mode=restart ;;
-  *) log "unknown argument '$1' (expected --loop or --restart)"; exit 2 ;;
+  "")          ;;
+  --loop)      mode=loop ;;
+  --restart)   mode=restart ;;
+  --supervise) mode=supervise ;;
+  *) log "unknown argument '$1' (expected --loop, --restart or --supervise)"; exit 2 ;;
 esac
+
+# --supervise: what a pod without systemd needs to keep the loop alive. Run it
+# in the container that runs the agents — tmux's server lives in whichever
+# container starts it, so supervising from a sidecar would put every agent
+# inside the sidecar, and its restart would kill them all. It never exits on its
+# own: while the kill switch is set or the opt-in is missing it waits (saying so
+# once), so lifting either takes effect within one retry.
+if [[ $mode == supervise ]]; then
+  retry="${CT_AUTOSTART_RETRY:-30}" runs=0 waiting=""
+  log "supervising ct-autostart --loop (restarted ${retry}s after it exits)"
+  while :; do
+    if [[ -e "$HOME/.ct-noautostart" ]]; then
+      [[ $waiting == off ]] || log "waiting: ~/.ct-noautostart is set"; waiting=off
+    elif [[ -z "${CT_AUTOSTART_FORCE:-}" && ! -e "$HOME/.ct-autostart" ]]; then
+      [[ $waiting == optin ]] || log "waiting: not enabled (touch ~/.ct-autostart)"; waiting=optin
+    else
+      waiting=""
+      "$0" --loop; rc=$?
+      runs=$((runs+1))
+      # Test hook: stop after N runs instead of supervising forever.
+      if [[ -n "${CT_AUTOSTART_SUPERVISE_RUNS:-}" && $runs -ge $CT_AUTOSTART_SUPERVISE_RUNS ]]; then
+        exit 0
+      fi
+      log "ct-autostart --loop exited ($rc) — starting it again in ${retry}s"
+    fi
+    sleep "$retry"
+  done
+fi
 
 [[ -e "$HOME/.ct-noautostart" ]] && { log "disabled by ~/.ct-noautostart"; exit 0; }
 if [[ -z "${CT_AUTOSTART_FORCE:-}" && ! -e "$HOME/.ct-autostart" ]]; then
@@ -118,29 +152,56 @@ stop_managed() {
   done
 }
 
+# What a session waiting for a human looks like on screen: Claude Code's
+# selection dialogs (trust, new MCP server, effort, permission) all end in this
+# footer or ask this question.
+DIALOG_RE="${CT_AUTOSTART_DIALOG_RE:-Enter to confirm|Do you trust|New MCP server found}"
+
+# A running session that isn't usable: its screen can't be read, is blank, or
+# waits at a prompt. A process check says healthy in all three cases. Warn
+# only — answering a dialog is a person's call.
+screen_problem() { # base -> prints the problem, returns 1 if there is none
+  local s
+  # The trailing colon makes `=name` a session-qualified PANE; capture-pane
+  # rejects a bare `=name`, and an error swallowed there reads as "all quiet".
+  s=$(tmux capture-pane -p -t "=claude-$1:" 2>/dev/null) || { echo "its screen could not be read"; return 0; }
+  if [[ -z ${s//[[:space:]]/} ]]; then echo "blank screen"; return 0; fi
+  if grep -qE "$DIALOG_RE" <<<"$s"; then
+    echo "waiting at a prompt: $(grep -m1 -E "$DIALOG_RE" <<<"$s" | sed 's/^[[:space:]]*//')"
+    return 0
+  fi
+  return 1
+}
+
 run_round() {
-  local ws base key out started=0 skipped=0 failed=0 wss=()
+  local ws base key out note problem started=0 skipped=0 failed=0 warned=0 wss=()
   # Collected first, not read in a `while read` loop: ct and tmux inside the
   # loop body would inherit that loop's stdin and could swallow the list.
   mapfile -t wss < <(workspaces)
   for ws in "${wss[@]}"; do
     base=${ws##*/}
 
-    # Transcript check. Claude keys project dirs by cwd with slashes turned into
-    # hyphens, so these names START WITH A HYPHEN: ls/find/stat parse that as an
-    # option and silently return nothing, which would skip every workspace and
-    # report success. Bash globs only.
-    key="$HOME/.claude/projects/${ws//\//-}"
-    if ! compgen -G "$key/*.jsonl" >/dev/null; then
-      log "$base: no transcript — skipping"; skipped=$((skipped+1)); continue
-    fi
-
     # Idempotent: re-running must not double-start anything. Note this exits 1
     # with "no server running" when the tmux server is absent, which is exactly
     # the state at boot — so it must not be treated as an error.
     if tmux has-session -t "=claude-$base" 2>/dev/null; then
-      log "$base: already running — skipping"; skipped=$((skipped+1)); continue
+      if problem=$(screen_problem "$base"); then
+        log "$base: WARNING — running, but $problem"; warned=$((warned+1))
+      else
+        log "$base: already running — skipping"
+      fi
+      skipped=$((skipped+1)); continue
     fi
+
+    # Transcript check, for the log only. A workspace IS an agent — retiring
+    # one means removing its workspace — so one without a transcript (created,
+    # never prompted) gets a fresh session. Skipping it, as before, made a new
+    # agent vanish at its first pod restart. Claude keys project dirs by cwd
+    # with slashes turned into hyphens, so these names START WITH A HYPHEN:
+    # ls/find/stat parse that as an option. Bash globs only.
+    key="$HOME/.claude/projects/${ws//\//-}"
+    note=""
+    compgen -G "$key/*.jsonl" >/dev/null || note=" (no transcript yet — fresh session)"
 
     # No --continue here any more: ct resumes the workspace's best transcript BY
     # ID on its own (see ct_pick_session). `--continue` only ever meant "most
@@ -152,14 +213,14 @@ run_round() {
     # sent stderr to /dev/null — the same silent-failure shape the rest of this
     # script is written to avoid.
     if out=$( cd "$ws" && CT_DETACH=1 ct 2>&1 </dev/null ); then
-      log "$base: started"; started=$((started+1))
+      log "$base: started$note"; started=$((started+1))
     else
       log "$base: FAILED — ${out//$'\n'/ | }"; failed=$((failed+1))
     fi
     sleep "${CT_AUTOSTART_STAGGER:-10}"
   done
 
-  log "done — started=$started skipped=$skipped failed=$failed"
+  log "done — started=$started skipped=$skipped failed=$failed warned=$warned"
   [[ $failed -eq 0 ]]
 }
 
