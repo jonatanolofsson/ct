@@ -48,7 +48,8 @@ case "$1" in
       [ "$(cat "$f")" = "-" ] && exit 1
       cat "$f"
     else
-      printf '────────\n❯ \n────────\n  ⏵⏵ auto mode on\n'
+      # Claude's input box: the top border carries the session name.
+      printf '──────────── %s ─\n❯ \n────────────\n  ⏵⏵ auto mode on\n' "${name#claude-}"
     fi
     exit 0 ;;
   set-option|rename-session|attach-session) exit 0 ;;

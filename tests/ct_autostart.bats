@@ -212,3 +212,25 @@ setup() {
   [ "$(grep -c 'no working tmux' <<<"$output")" -eq 2 ]
   [[ "$output" == *"--loop exited (1) — starting it again"* ]]
 }
+
+@test "a dialog the pattern does not know is still caught: no input box on screen" {
+  touch "$HOME/.ct-autostart"
+  echo "claude-agent-one" > "$TMUX_STUB_SESSIONS"
+  mkdir -p "$BATS_TEST_TMPDIR/screens"
+  # edgelab's effort dialog, verbatim: no footer, no known question.
+  printf '  Use Fable 5.1 at high effort by default?\n  ❯ Keep xhigh\n    Switch Fable 5.1 to high effort\n' \
+    > "$BATS_TEST_TMPDIR/screens/claude-agent-one"
+  run env TMUX_STUB_SCREENS="$BATS_TEST_TMPDIR/screens" CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  [[ "$output" == *"agent-one: WARNING — running, but no input box on screen (a dialog?) — last line: Switch Fable 5.1 to high effort"* ]]
+  [[ "$output" == *"warned=1"* ]]
+}
+
+@test "a fresh start in an untrusted workspace says it will likely wait at the trust dialog" {
+  touch "$HOME/.ct-autostart"
+  command -v jq >/dev/null || skip "jq not installed"
+  printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}' "$HOME/dev/agent-two" > "$HOME/.claude.json"
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  [[ "$output" == *"agent-one: started (no transcript yet — fresh session) — not trusted yet"* ]]
+  [[ "$output" == *"agent-two: started (no transcript yet — fresh session)"* ]]
+  [[ "$output" != *"agent-two: started (no transcript yet — fresh session) — not trusted"* ]]
+}

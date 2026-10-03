@@ -152,13 +152,16 @@ stop_managed() {
   done
 }
 
-# What a session waiting for a human looks like on screen: Claude Code's
-# selection dialogs (trust, new MCP server, effort, permission) all end in this
-# footer or ask this question.
+# Dialogs we can name, to make a warning say WHAT the session waits for. They
+# are not what decides health: listing every dialog is an endless chase (the
+# effort dialog has no footer this matches). See screen_problem.
 DIALOG_RE="${CT_AUTOSTART_DIALOG_RE:-Enter to confirm|Do you trust|New MCP server found}"
 
 # A running session that isn't usable: its screen can't be read, is blank, or
-# waits at a prompt. A process check says healthy in all three cases. Warn
+# shows something other than the input box. A process check says healthy in
+# all of these. The test is POSITIVE: a healthy session, idle or working,
+# always shows the input box, whose top border carries the session name
+# (`──── <workspace> ─`, from `claude --name`). Every dialog replaces it. Warn
 # only — answering a dialog is a person's call.
 screen_problem() { # base -> prints the problem, returns 1 if there is none
   local s
@@ -166,11 +169,20 @@ screen_problem() { # base -> prints the problem, returns 1 if there is none
   # rejects a bare `=name`, and an error swallowed there reads as "all quiet".
   s=$(tmux capture-pane -p -t "=claude-$1:" 2>/dev/null) || { echo "its screen could not be read"; return 0; }
   if [[ -z ${s//[[:space:]]/} ]]; then echo "blank screen"; return 0; fi
+  grep -qF -- "─ $1 ─" <<<"$s" && return 1
   if grep -qE "$DIALOG_RE" <<<"$s"; then
     echo "waiting at a prompt: $(grep -m1 -E "$DIALOG_RE" <<<"$s" | sed 's/^[[:space:]]*//')"
-    return 0
+  else
+    echo "no input box on screen (a dialog?) — last line: $(grep -v '^[[:space:]]*$' <<<"$s" | tail -1 | sed 's/^[[:space:]]*//')"
   fi
-  return 1
+  return 0
+}
+
+# A fresh session in a directory Claude doesn't trust yet stops at the trust
+# dialog. Say so at start; the next pass's screen check will show it too.
+untrusted() { # workspace dir -> true when ~/.claude.json does not trust it
+  command -v jq >/dev/null 2>&1 || return 1
+  [[ $(jq -r --arg p "$1" '.projects[$p].hasTrustDialogAccepted // false' "$HOME/.claude.json" 2>/dev/null) != true ]]
 }
 
 run_round() {
@@ -201,7 +213,10 @@ run_round() {
     # ls/find/stat parse that as an option. Bash globs only.
     key="$HOME/.claude/projects/${ws//\//-}"
     note=""
-    compgen -G "$key/*.jsonl" >/dev/null || note=" (no transcript yet — fresh session)"
+    if ! compgen -G "$key/*.jsonl" >/dev/null; then
+      note=" (no transcript yet — fresh session)"
+      untrusted "$ws" && note="$note — not trusted yet, will likely wait at the trust dialog"
+    fi
 
     # No --continue here any more: ct resumes the workspace's best transcript BY
     # ID on its own (see ct_pick_session). `--continue` only ever meant "most
