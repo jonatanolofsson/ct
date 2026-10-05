@@ -87,8 +87,13 @@ fi
 # instead of leaving it to poison the next apt call.
 tmux_ok() { command -v tmux >/dev/null 2>&1 && tmux -V >/dev/null 2>&1; }
 
+# Does the glob match anything? Not `compgen -G`: compgen exists only when bash
+# was built with programmable completion (Fedora 43's bash has none, and there
+# every check said "nothing"). The directory is quoted, only the pattern expands.
+glob_any() { local f; for f in "$1"/$2; do [[ -e $f || -L $f ]] && return 0; done; return 1; }
+
 if ! tmux_ok; then
-  if compgen -G "$HOME/.cache/debs/*.deb" >/dev/null; then
+  if glob_any "$HOME/.cache/debs" '*.deb'; then
     log "tmux not usable — installing from the PVC cache"
     sudo dpkg -i "$HOME"/.cache/debs/*.deb 2>&1 | tail -3 | sed 's/^/    dpkg: /'
     tmux_ok || {
@@ -213,7 +218,7 @@ run_round() {
     # ls/find/stat parse that as an option. Bash globs only.
     key="$HOME/.claude/projects/${ws//\//-}"
     note=""
-    if ! compgen -G "$key/*.jsonl" >/dev/null; then
+    if ! glob_any "$key" '*.jsonl'; then
       note=" (no transcript yet — fresh session)"
       untrusted "$ws" && note="$note — not trusted yet, will likely wait at the trust dialog"
     fi
