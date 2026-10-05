@@ -141,3 +141,22 @@ mkts() { # workspace, session-id, lines
   ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
   ! grep -q -- '--resume' "$TMUX_STUB_LOG"
 }
+
+# Fedora 43's bash is built without programmable completion: no compgen. A
+# BASH_ENV that disables the builtin reproduces that for every script started.
+no_compgen() { printf 'enable -n compgen complete 2>/dev/null\n' > "$BATS_TEST_TMPDIR/nocompgen.sh"; export BASH_ENV="$BATS_TEST_TMPDIR/nocompgen.sh"; }
+
+@test "resumes by id where bash has no compgen (Fedora 43)" {
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200
+  no_compgen
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  grep -q -- '--resume aaaaaaaa-1111' "$TMUX_STUB_LOG"
+}
+
+@test "resumes a workspace whose path has spaces" {
+  mkdir -p "$HOME/dev/agent with space"
+  mkts "$HOME/dev/agent with space" "bbbbbbbb-2222" 200
+  no_compgen
+  ( cd "$HOME/dev/agent with space" && "$REPO/bin/ct" )
+  grep -q -- '--resume bbbbbbbb-2222' "$TMUX_STUB_LOG"
+}

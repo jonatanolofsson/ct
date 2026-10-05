@@ -104,10 +104,17 @@ cmd="claude"
 #
 # Transcript dirs are the cwd with '/' turned into '-', so they START WITH A
 # HYPHEN: ls/find/stat parse that as an option. Bash globs only.
+#
+# glob_any, not `compgen -G`: compgen exists only when bash was built with
+# programmable completion. Fedora 43's bash has none, so there ct_pick_session
+# failed silently and EVERY session started empty instead of resuming. The
+# directory is quoted (spaces are safe) and only the pattern expands.
+glob_any() { local f; for f in "$1"/$2; do [[ -e $f || -L $f ]] && return 0; done; return 1; }
+
 ct_pick_session() {
   local dir="$1" min="${CT_MIN_LINES:-50}" key best=""
   key="$HOME/.claude/projects/${dir//\//-}"
-  compgen -G "$key/*.jsonl" >/dev/null 2>&1 || return 1
+  glob_any "$key" '*.jsonl' || return 1
   # newest first; take the first one that is more than a stub
   while IFS= read -r f; do
     if [[ $(wc -l < "$f") -ge $min ]]; then best="$f"; break; fi

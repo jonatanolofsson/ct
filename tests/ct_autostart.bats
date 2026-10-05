@@ -234,3 +234,15 @@ setup() {
   [[ "$output" == *"agent-two: started (no transcript yet — fresh session)"* ]]
   [[ "$output" != *"agent-two: started (no transcript yet — fresh session) — not trusted"* ]]
 }
+
+@test "resumes, not 'no transcript', where bash has no compgen (Fedora 43)" {
+  touch "$HOME/.ct-autostart"
+  mktranscript "$HOME/dev/agent-one"
+  printf 'enable -n compgen complete 2>/dev/null\n' > "$BATS_TEST_TMPDIR/nocompgen.sh"
+  run env BASH_ENV="$BATS_TEST_TMPDIR/nocompgen.sh" CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"agent-one: started"* ]]
+  [[ "$output" != *"agent-one: started (no transcript"* ]]
+  [[ "$output" != *"command not found"* ]]
+  grep -q -- "--resume x" "$TMUX_STUB_LOG"
+}
