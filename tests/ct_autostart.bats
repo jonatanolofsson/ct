@@ -246,3 +246,87 @@ setup() {
   [[ "$output" != *"command not found"* ]]
   grep -q -- "--resume x" "$TMUX_STUB_LOG"
 }
+
+# --- agents: what ct recorded is what comes back
+
+mkrecord() { mkdir -p "$HOME/.local/share/ct/agents"; printf '%b' "$2" > "$HOME/.local/share/ct/agents/$1"; }
+
+@test "no record: claude only, exactly as before agents existed" {
+  touch "$HOME/.ct-autostart"
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  [ "$status" -eq 0 ]
+  grep -q -- 'new-session -d -s claude-agent-one ' "$TMUX_STUB_LOG"
+  ! grep -q -- 'opencode' "$TMUX_STUB_LOG"
+  [[ "$output" == *"agent-one: started"* ]]
+}
+
+@test "starts every recorded agent, opencode on its recorded port" {
+  touch "$HOME/.ct-autostart"
+  mkrecord agent-one 'claude\nopencode 4150\n'
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  [ "$status" -eq 0 ]
+  grep -q -- 'new-session -d -s claude-agent-one ' "$TMUX_STUB_LOG"
+  grep -q -- 'new-session -d -s opencode-agent-one .*opencode --port 4150 --hostname 127.0.0.1 --continue' "$TMUX_STUB_LOG"
+  [[ "$output" == *"agent-one [opencode]: started"* ]]
+}
+
+@test "an empty record starts nothing for that workspace" {
+  touch "$HOME/.ct-autostart"
+  mkrecord agent-one ''
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  ! grep -q -- 'agent-one' "$TMUX_STUB_LOG"
+  grep -q -- 'new-session -d -s claude-agent-two ' "$TMUX_STUB_LOG"
+}
+
+@test "no claude anywhere: no claude warm-up" {
+  touch "$HOME/.ct-autostart"
+  mkrecord agent-one 'opencode 4150\n'
+  mkrecord agent-two ''
+  run "$REPO/bin/ct-autostart"
+  [ "$status" -eq 0 ]
+  [ ! -s "$CLAUDE_STUB_LOG" ]
+  [[ "$output" != *"warm-up"* ]]
+}
+
+@test "a healthy running opencode session is skipped after a health probe" {
+  touch "$HOME/.ct-autostart"
+  mkrecord agent-one 'opencode 4150\n'; mkrecord agent-two ''
+  echo "opencode-agent-one" > "$TMUX_STUB_SESSIONS"
+  export CURL_STUB_LOG="$BATS_TEST_TMPDIR/curl.log"
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  [[ "$output" == *"agent-one [opencode]: already running"* ]]
+  grep -q -- 'http://127.0.0.1:4150/global/health' "$CURL_STUB_LOG"
+  ! grep -q -- 'new-session' "$TMUX_STUB_LOG"
+}
+
+@test "an opencode session whose server does not answer is a WARNING, not killed" {
+  touch "$HOME/.ct-autostart"
+  mkrecord agent-one 'opencode 4150\n'; mkrecord agent-two ''
+  echo "opencode-agent-one" > "$TMUX_STUB_SESSIONS"
+  run env CT_AUTOSTART_NO_WARMUP=1 CURL_STUB_FAIL=1 "$REPO/bin/ct-autostart"
+  [[ "$output" == *"agent-one [opencode]: WARNING — running, but its server on port 4150 does not answer"* ]]
+  ! grep -q -- 'kill-session' "$TMUX_STUB_LOG"
+}
+
+@test "the next pass (what --loop repeats) brings a dead opencode session back" {
+  touch "$HOME/.ct-autostart"
+  mkrecord agent-one 'opencode 4150\n'; mkrecord agent-two ''
+  # first round finds it running; it then dies; the second round restarts it
+  echo "opencode-agent-one" > "$TMUX_STUB_SESSIONS"
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  : > "$TMUX_STUB_SESSIONS"
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  [[ "$output" == *"agent-one [opencode]: started"* ]]
+  grep -q -- 'new-session -d -s opencode-agent-one ' "$TMUX_STUB_LOG"
+}
+
+@test "--restart stops every recorded agent but never its own session" {
+  touch "$HOME/.ct-autostart"
+  mkrecord agent-one 'claude\nopencode 4150\n'; mkrecord agent-two ''
+  printf 'claude-agent-one\nopencode-agent-one\n' > "$TMUX_STUB_SESSIONS"
+  run env CT_AUTOSTART_NO_WARMUP=1 TMUX=1 TMUX_STUB_SELF=claude-agent-one "$REPO/bin/ct-autostart" --restart
+  grep -q -- 'kill-session -t =opencode-agent-one' "$TMUX_STUB_LOG"
+  ! grep -q -- 'kill-session -t =claude-agent-one' "$TMUX_STUB_LOG"
+  [[ "$output" == *"agent-one: this command runs inside it"* ]]
+  grep -q -- 'new-session -d -s opencode-agent-one ' "$TMUX_STUB_LOG"
+}

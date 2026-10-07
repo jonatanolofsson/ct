@@ -5,6 +5,7 @@
 #   TMUX_STUB_SESSIONS   file listing existing session names, one per line
 #   TMUX_STUB_WS         value returned for @ct_workspace show-option
 #   TMUX_STUB_ORIGIN     value returned for @ct_origin show-option
+#   TMUX_STUB_PORT       value returned for @ct_port show-option
 #   TMUX_STUB_SELF       session name returned by display-message (the caller)
 #   TMUX_STUB_SCREENS    dir with one file per session name: its screen for
 #                        capture-pane ("-" = the capture fails). Default screen:
@@ -21,6 +22,7 @@ case "$1" in
     case "$*" in
       *@ct_workspace*) [ -n "${TMUX_STUB_WS:-}" ] && echo "$TMUX_STUB_WS" ;;
       *@ct_origin*)    [ -n "${TMUX_STUB_ORIGIN:-}" ] && echo "$TMUX_STUB_ORIGIN" ;;
+      *@ct_port*)      [ -n "${TMUX_STUB_PORT:-}" ] && echo "$TMUX_STUB_PORT" ;;
     esac
     exit 0 ;;
   new-session)

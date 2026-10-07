@@ -80,9 +80,25 @@ Two modes worth knowing for a fleet:
 
       setsid bash -c 'sleep 45; exec ct-autostart --supervise >> "$HOME/.ct-autostart.log" 2>&1' &
 
-Every workspace gets an agent: its newest substantive transcript resumed by id,
-or a fresh session if it has none yet (a workspace that was created but never
-prompted). A workspace IS an agent; to retire one, remove its directory.
+Every workspace gets its agents back, each resuming its own conversation:
+- Claude resumes its newest substantive transcript by id.
+- OpenCode resumes with `--continue`, its last session in the workspace.
+- An agent with no saved conversation yet (a workspace created but never prompted) gets a fresh session.
+
+A workspace IS an agent; to retire one, remove its directory.
+
+**Which agents** a workspace runs is ct's record, `~/.local/share/ct/agents/<workspace>`. ct writes it
+whenever it launches an agent, with one line per agent: `claude`, or `opencode <port>`.
+- **No record** means `claude`, exactly as before agents existed. An existing pod therefore upgrades with
+  no change.
+- **An empty record** means no agents.
+- **`CT_AGENT=<agent> CT_AGENT_FORGET=1 ct`** drops one agent from the record without touching a running
+  session.
+
+`ct-autostart` never builds a command line itself. It starts every recorded agent with
+`CT_AGENT=<agent> CT_DETACH=1 ct`, so ct remains the only place that knows how to launch one. The
+credential warm-up (`claude -p ok`) runs only when some workspace records `claude`; OpenCode reads its
+keys from the environment and has no OAuth token to race on.
 
 Every pass also reads the screen of each session that was already running and
 logs `WARNING — running, but …` when it is blank, unreadable, or does not show
@@ -95,6 +111,11 @@ process check; this is the only place it shows. The summary line counts them
 (`warned=N`). It only warns — answering a dialog is a person's decision. A fresh
 session in a directory `~/.claude.json` does not trust yet is flagged at start,
 since it will stop at the trust dialog.
+
+An OpenCode session is checked over HTTP instead of by its screen:
+`GET http://127.0.0.1:<port>/global/health` must answer `"healthy":true`. That is sturdier than reading
+a TUI. A server that doesn't answer is a `WARNING` too, and the session is not killed. A session whose
+process has died is gone from tmux, and the next pass (`--loop`) starts it again, as for Claude.
 
 Workspaces are discovered as `~/dev/agent-*` by default. If your site names them
 plainly (`~/dev/billing`, `~/dev/billing-api`), set `CT_AUTOSTART_GLOB='*'`;
@@ -109,6 +130,8 @@ already installed once will silently miss transitive dependencies.
 | What | Why |
 |---|---|
 | `claude` CLI installed + credentials present | `ct-autostart` refuses to start agents that would die on missing login |
+| `opencode` installed, its provider keys in the environment (only for OpenCode agents) | OpenCode sessions start from `ct-autostart` with no person present to log in |
+| `curl` (only for OpenCode agents) | the health probe; without it, running OpenCode sessions are not checked |
 | tmux installable (apt, cached .debs, or nix) | sessions live in tmux |
 | Persistent `$HOME` | transcripts, workspaces and installed copies must survive restarts |
 

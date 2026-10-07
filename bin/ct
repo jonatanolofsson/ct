@@ -19,7 +19,22 @@
 #   Detach, leave it running:       Ctrl-b  then  d
 #   List running sessions:          tmux ls
 #   Reattach explicitly:            tmux attach -t =<name>     # '=' means exact
+#
+# Agents. CT_AGENT picks which coding agent the session runs: claude (default) or
+# opencode. Each agent gets its own session, <agent>-<workspace>, so one
+# workspace can run both side by side. An opencode session also serves its HTTP
+# API on a loopback port fixed per workspace, so you can join it from a second
+# terminal (`opencode attach`) or from a browser through an authenticating proxy
+# (CT_OPENCODE_WEB). ct records each agent it launches, so ct-autostart can bring
+# that agent back after a pod restart. To stop autostarting an agent in a
+# workspace:  CT_AGENT=<agent> CT_AGENT_FORGET=1 ct
 set -euo pipefail
+
+agent="${CT_AGENT:-claude}"
+case "$agent" in
+  claude|opencode) ;;
+  *) echo "ct: unknown CT_AGENT '$agent' (expected claude or opencode)" >&2; exit 2 ;;
+esac
 
 # A workspace is one directory directly under a workspace root: ~/dev/<session>
 # for multi-repo agent sessions, ~/workspaces/<repo> for the curated clones this
@@ -50,13 +65,97 @@ done
 # printf, not `basename`: basename emits a trailing newline, which this tr (a
 # COMPLEMENT class — every character outside the set is replaced) turned into a
 # stray '-' on the end of every session name.
-name="claude-$(printf '%s' "${workspace##*/}" | tr -c 'A-Za-z0-9_-' '-')"
+base="$(printf '%s' "${workspace##*/}" | tr -c 'A-Za-z0-9_-' '-')"
+name="$agent-$base"
+
+# glob_any, not `compgen -G`: compgen exists only when bash was built with
+# programmable completion. Fedora 43's bash has none, so there ct_pick_session
+# failed silently and EVERY session started empty instead of resuming. The
+# directory is quoted (spaces are safe) and only the pattern expands.
+glob_any() { local f; for f in "$1"/$2; do [[ -e $f || -L $f ]] && return 0; done; return 1; }
+
+# --- agent record: which agents ct-autostart brings back for this workspace ---
+#
+# One file per workspace, one line per agent: "claude", or "opencode <port>".
+# On disk, not in tmux options, because those die with the pod and the record
+# is exactly what has to survive it. NO file means "claude" — what every
+# workspace meant before agents existed — so upgrading ct changes nothing for
+# workspaces that never ran another agent. An EMPTY file means "nothing".
+records="${CT_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ct}/agents"
+record="$records/$base"
+
+record_line() { # agent -> its line, if recorded
+  [[ -f $record ]] || return 1
+  awk -v a="$1" '$1 == a { print; found = 1; exit } END { exit !found }' "$record"
+}
+
+# A Claude agent that predates the record: its transcript, or its session.
+claude_evidence() {
+  glob_any "$HOME/.claude/projects/${workspace//\//-}" '*.jsonl' ||
+    tmux has-session -t "=claude-$base" 2>/dev/null
+}
+
+record_add() { # line
+  record_line "${1%% *}" >/dev/null && return 0
+  mkdir -p "$records"
+  # Creating the record for a workspace whose Claude agent predates it: write
+  # claude in too. Otherwise the first opencode launch would turn "no file =
+  # claude" into "opencode only", and the Claude agent would silently stop
+  # coming back after the next pod restart.
+  if [[ ! -f $record && $agent != claude ]] && claude_evidence; then
+    echo claude >> "$record"
+  fi
+  echo "$1" >> "$record"
+}
+
+if [[ -n "${CT_AGENT_FORGET:-}" ]]; then
+  if [[ ! -f $record ]]; then
+    mkdir -p "$records"
+    # No file meant "claude"; keep every other agent's meaning by writing
+    # exactly that out before taking this one away.
+    if [[ $agent == claude ]] || claude_evidence; then echo claude > "$record"; else : > "$record"; fi
+  fi
+  awk -v a="$agent" '$1 != a' "$record" > "$record.tmp" && mv "$record.tmp" "$record"
+  echo "ct: $base: ct-autostart will no longer start $agent here (a running session is left alone)" >&2
+  exit 0
+fi
+
+# --- opencode: one loopback port per workspace, kept for good ---
+#
+# Recorded, not just hashed: a hash into 100 ports collides between two of a
+# dozen workspaces more often than not. The hash only picks where the search
+# starts, so a workspace usually lands on the same port it would hash to, and the
+# record makes it permanent — the attach URL and the web path stay the same
+# across pod restarts, so a bookmark keeps working.
+opencode_port() {
+  local line lo="${CT_OPENCODE_PORT_MIN:-4100}" hi="${CT_OPENCODE_PORT_MAX:-4199}" used n i p start
+  if line="$(record_line opencode)" && [[ $line == *" "* ]]; then
+    echo "${line##* }"; return 0
+  fi
+  used="$(cat "$records"/* 2>/dev/null | awk '$1 == "opencode" && NF > 1 { print $2 }')"
+  n=$((hi - lo + 1))
+  start=$(( $(printf '%s' "$workspace" | cksum | cut -d' ' -f1) % n ))
+  for ((i = 0; i < n; i++)); do
+    p=$((lo + (start + i) % n))
+    grep -qx "$p" <<<"$used" || { echo "$p"; return 0; }
+  done
+  echo "ct: no free opencode port in $lo-$hi" >&2
+  return 1
+}
+
+opencode_access() { # port -> how to reach the server, on stderr
+  echo "ct: opencode server on 127.0.0.1:$1 — join it with: opencode attach http://127.0.0.1:$1" >&2
+  if [[ -n "${CT_OPENCODE_WEB:-}" ]]; then
+    echo "ct: opencode web: ${CT_OPENCODE_WEB//\{port\}/$1}" >&2
+  fi
+}
 
 # One-time migration off the old trailing-dash names, so a session started by the
 # previous version of this script is adopted instead of orphaned. Only the exact
 # workspace-plus-dash form is claimed; old per-repo names (e.g. claude-myrepo-)
 # are deliberately left alone because they are ambiguous across workspaces.
-if ! tmux has-session -t "=$name" 2>/dev/null && tmux has-session -t "=$name-" 2>/dev/null; then
+# Claude only: the trailing-dash names predate every other agent.
+if [[ $agent == claude ]] && ! tmux has-session -t "=$name" 2>/dev/null && tmux has-session -t "=$name-" 2>/dev/null; then
   tmux rename-session -t "=$name-" "$name"
   echo "ct: adopted legacy session '$name-' as '$name'" >&2
 fi
@@ -77,6 +176,10 @@ if tmux has-session -t "=$name" 2>/dev/null; then
     echo "ct: '$name' is already running — arguments ($*) apply only at first launch, ignoring" >&2
   fi
   origin="$(tmux show-option -qv -t "$name" @ct_origin 2>/dev/null || true)"
+  if [[ $agent == opencode ]]; then
+    port="$(tmux show-option -qv -t "$name" @ct_port 2>/dev/null || true)"
+    [[ -n $port ]] && opencode_access "$port"
+  fi
   if [[ -n "${CT_DETACH:-}" ]]; then
     echo "ct: '$name' already running${origin:+ (started in $origin)} — detached, not attaching" >&2
     exit 0
@@ -87,6 +190,40 @@ fi
 
 # Quote arguments individually; the previous "claude ${*:-}" form word-split any
 # argument containing spaces.
+if [[ $agent == opencode ]]; then
+  port="$(opencode_port)"
+  # The TUI serves the same HTTP API as `opencode serve`, so one process is
+  # both the session you see in tmux and the server others attach to. Loopback
+  # only: the way in from outside is an authenticating proxy (code-server's
+  # /absproxy/, behind its sign-in), never an open port on the pod.
+  cmd="opencode --port $port --hostname 127.0.0.1"
+  # Resume by default, as for claude. opencode keeps its own session store and
+  # `--continue` picks the last session of this directory; with none it simply
+  # starts fresh. The caller's own session choice wins.
+  resuming=0
+  for a in "$@"; do
+    case "$a" in -c|--continue|-s|--session|--session=*|--fork) resuming=1 ;; esac
+  done
+  if ((resuming == 0)) && [[ -z "${CT_FRESH:-}" ]]; then
+    cmd+=" --continue"
+  fi
+  if (($#)); then
+    cmd+=" $(printf '%q ' "$@")"
+  fi
+  record_add "opencode $port"
+  tmux new-session -d -s "$name" -c "$workspace" "$cmd"
+  tmux set-option -t "$name" @ct_workspace "$workspace" >/dev/null
+  tmux set-option -t "$name" @ct_origin "$PWD" >/dev/null
+  tmux set-option -t "$name" @ct_agent "$agent" >/dev/null
+  tmux set-option -t "$name" @ct_port "$port" >/dev/null
+  opencode_access "$port"
+  if [[ -n "${CT_DETACH:-}" ]]; then
+    echo "ct: started '$name' detached (attach with: tmux attach -t '=$name')" >&2
+    exit 0
+  fi
+  exec tmux attach-session -t "=$name"
+fi
+
 cmd="claude"
 
 # Resume the workspace's conversation by DEFAULT. Starting fresh is what people
@@ -105,12 +242,6 @@ cmd="claude"
 # Transcript dirs are the cwd with '/' turned into '-', so they START WITH A
 # HYPHEN: ls/find/stat parse that as an option. Bash globs only.
 #
-# glob_any, not `compgen -G`: compgen exists only when bash was built with
-# programmable completion. Fedora 43's bash has none, so there ct_pick_session
-# failed silently and EVERY session started empty instead of resuming. The
-# directory is quoted (spaces are safe) and only the pattern expands.
-glob_any() { local f; for f in "$1"/$2; do [[ -e $f || -L $f ]] && return 0; done; return 1; }
-
 ct_pick_session() {
   local dir="$1" min="${CT_MIN_LINES:-50}" key best=""
   key="$HOME/.claude/projects/${dir//\//-}"
@@ -158,9 +289,11 @@ fi
 # workspace path: two keys for one agent, and the next resume missing the
 # conversation. One start directory gives one key. @ct_origin still records
 # where ct was run, for the attach message.
+record_add claude
 tmux new-session -d -s "$name" -c "$workspace" "$cmd"
 tmux set-option -t "$name" @ct_workspace "$workspace" >/dev/null
 tmux set-option -t "$name" @ct_origin "$PWD" >/dev/null
+tmux set-option -t "$name" @ct_agent "$agent" >/dev/null
 
 # CT_DETACH=1: create the session and return, instead of attaching. This is
 # what lets a boot script call ct — `tmux attach` needs a controlling TTY and

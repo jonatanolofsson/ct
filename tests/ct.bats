@@ -160,3 +160,103 @@ no_compgen() { printf 'enable -n compgen complete 2>/dev/null\n' > "$BATS_TEST_T
   ( cd "$HOME/dev/agent with space" && "$REPO/bin/ct" )
   grep -q -- '--resume bbbbbbbb-2222' "$TMUX_STUB_LOG"
 }
+
+# --- agents: CT_AGENT=opencode, the agent record, ports
+
+record() { cat "$HOME/.local/share/ct/agents/$1"; }
+
+@test "unknown CT_AGENT is refused" {
+  run bash -c "cd '$HOME/dev/agent-alpha' && CT_AGENT=vim '$REPO/bin/ct'"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unknown CT_AGENT"* ]]
+  ! grep -q new-session "$TMUX_STUB_LOG"
+}
+
+@test "opencode: own session, loopback server, workspace root, --continue" {
+  ( cd "$HOME/dev/agent-alpha/repo-x" && CT_AGENT=opencode "$REPO/bin/ct" )
+  grep -qE -- "new-session -d -s opencode-agent-alpha -c $HOME/dev/agent-alpha opencode --port 41[0-9]{2} --hostname 127.0.0.1 --continue" "$TMUX_STUB_LOG"
+  grep -q -- 'set-option -t opencode-agent-alpha @ct_agent opencode' "$TMUX_STUB_LOG"
+  grep -qE -- 'set-option -t opencode-agent-alpha @ct_port 41[0-9]{2}' "$TMUX_STUB_LOG"
+  ! grep -q -- '--name' "$TMUX_STUB_LOG"
+}
+
+@test "opencode: the port is recorded and reused on the next launch" {
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" )
+  port="$(record agent-alpha | awk '$1=="opencode"{print $2}')"
+  [[ "$port" =~ ^41[0-9]{2}$ ]]
+  : > "$TMUX_STUB_SESSIONS"; : > "$TMUX_STUB_LOG"      # the session died
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" )
+  grep -q -- "--port $port " "$TMUX_STUB_LOG"
+  [ "$(record agent-alpha | grep -c opencode)" -eq 1 ]
+}
+
+@test "opencode: two workspaces never share a port, a full range is an error" {
+  export CT_OPENCODE_PORT_MIN=4100 CT_OPENCODE_PORT_MAX=4101
+  mkdir -p "$HOME/dev/agent-c"
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" )
+  ( cd "$HOME/dev/agent-alpha-2" && CT_AGENT=opencode "$REPO/bin/ct" )
+  a="$(record agent-alpha | awk '{print $2}')"; b="$(record agent-alpha-2 | awk '{print $2}')"
+  [ "$a" != "$b" ]
+  run bash -c "cd '$HOME/dev/agent-c' && CT_AGENT=opencode '$REPO/bin/ct'"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no free opencode port"* ]]
+}
+
+@test "opencode: CT_FRESH and the caller's own session flag drop --continue" {
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode CT_FRESH=1 "$REPO/bin/ct" )
+  ! grep -q -- '--continue' "$TMUX_STUB_LOG"
+  : > "$TMUX_STUB_SESSIONS"; : > "$TMUX_STUB_LOG"
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" -s ses_123 )
+  ! grep -q -- '--continue' "$TMUX_STUB_LOG"
+  grep -q -- '-s ses_123' "$TMUX_STUB_LOG"
+}
+
+@test "opencode starts beside a running claude session, not attached to it" {
+  echo "claude-agent-alpha" > "$TMUX_STUB_SESSIONS"
+  export TMUX_STUB_WS="$HOME/dev/agent-alpha"
+  run bash -c "cd '$HOME/dev/agent-alpha' && CT_AGENT=opencode '$REPO/bin/ct'"
+  [ "$status" -eq 0 ]
+  grep -q -- 'new-session -d -s opencode-agent-alpha ' "$TMUX_STUB_LOG"
+  [[ "$output" != *"already running"* ]]
+}
+
+@test "reattaching an opencode session prints how to reach its server" {
+  echo "opencode-agent-alpha" > "$TMUX_STUB_SESSIONS"
+  export TMUX_STUB_WS="$HOME/dev/agent-alpha" TMUX_STUB_PORT=4123
+  run bash -c "cd '$HOME/dev/agent-alpha' && CT_AGENT=opencode CT_OPENCODE_WEB='https://code.example/absproxy/{port}/' '$REPO/bin/ct'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"opencode attach http://127.0.0.1:4123"* ]]
+  [[ "$output" == *"https://code.example/absproxy/4123/"* ]]
+}
+
+@test "record: a claude launch records claude" {
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  [ "$(record agent-alpha)" = "claude" ]
+}
+
+@test "record: first opencode launch keeps a pre-existing claude agent" {
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200     # claude ran here before records
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" )
+  record agent-alpha | grep -qx claude
+  record agent-alpha | grep -qE '^opencode [0-9]+$'
+}
+
+@test "record: opencode in a workspace claude never ran records opencode only" {
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" )
+  ! record agent-alpha | grep -q claude
+}
+
+@test "CT_AGENT_FORGET drops one agent and launches nothing" {
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" )
+  : > "$TMUX_STUB_LOG"
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode CT_AGENT_FORGET=1 "$REPO/bin/ct" )
+  [ "$(record agent-alpha)" = "claude" ]
+  ! grep -q new-session "$TMUX_STUB_LOG"
+}
+
+@test "CT_AGENT_FORGET for claude without a record leaves an empty record" {
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT_FORGET=1 "$REPO/bin/ct" )
+  [ -f "$HOME/.local/share/ct/agents/agent-alpha" ]
+  [ -z "$(record agent-alpha)" ]
+}

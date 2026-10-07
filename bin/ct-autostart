@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# ct-autostart — a detached Claude session for every workspace: its saved
-# conversation resumed by id, or a fresh one if it has none yet. Safe to run by
-# hand at any time; it is what the pod runs ~45s after boot.
+# ct-autostart — a detached session for every agent of every workspace: its saved
+# conversation resumed, or a fresh one if it has none yet. Safe to run by hand at
+# any time; it is what the pod runs ~45s after boot.
+#
+# Which agents a workspace runs is ct's record (~/.local/share/ct/agents/<ws>,
+# written whenever ct launches one). No record means claude alone, so a workspace
+# that never ran another agent comes back exactly as it always did. Launching is
+# always `CT_AGENT=<agent> ct`: ct is the one place that knows how to start an
+# agent, and this script never builds a command line of its own.
 #
 # Opt-in per user, by a file on the PVC:  touch ~/.ct-autostart
 # Kill switch, wins over the above:       touch ~/.ct-noautostart
@@ -110,18 +116,6 @@ fi
 tmux_ok || { log "no working tmux — cannot start any session, giving up"; exit 1; }
 log "tmux ready: $(tmux -V)"
 
-# One warm-up before the herd. Twelve agents starting at once would each try to
-# refresh the same rotating OAuth token within seconds; the first wins and the
-# rest can get invalid_grant, and a claude that exits takes its pane, its
-# session, and — if it is the last one — the tmux server with it.
-if [[ -z "${CT_AUTOSTART_NO_WARMUP:-}" ]]; then
-  if timeout 90 claude -p 'ok' >/dev/null 2>&1; then
-    log "credential warm-up ok"
-  else
-    log "credential warm-up failed (continuing anyway)"
-  fi
-fi
-
 # Which directories under ~/dev are workspaces. The default keeps the agent-*
 # naming; a site that names workspaces plainly (hus, mgb-ekonomi) sets
 # CT_AUTOSTART_GLOB='*'. Dot-dirs are never workspaces — .gitcache/ lives here —
@@ -138,22 +132,47 @@ workspaces() {
   done
 }
 
+# The workspace's name in session names and in ct's record. Must match ct's own
+# sanitising exactly, or this script would look for sessions ct never names.
+ws_key() { printf '%s' "${1##*/}" | tr -c 'A-Za-z0-9_-' '-'; }
+
+records="${CT_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ct}/agents"
+
+# A workspace's agents, one line each: "claude", or "opencode <port>". No record
+# means claude — see the header. An empty record means none.
+agents_of() { # workspace dir
+  local f
+  f="$records/$(ws_key "$1")"
+  if [[ -f $f ]]; then awk 'NF' "$f"; else echo claude; fi
+}
+
+# How a session appears in the log. Claude keeps the bare workspace name, so
+# every log line and alert written before agents existed still reads the same.
+label() { # base agent
+  if [[ $2 == claude ]]; then printf '%s' "$1"; else printf '%s [%s]' "$1" "$2"; fi
+}
+
 # --restart: stop the sessions this script manages and nothing else. Never the
 # session running this command — killing that ends the very agent that asked
 # for the restart, mid-command, before any new session has started.
 stop_managed() {
-  local self="" ws name wss=()
+  local self="" ws key a _ name wss=() lines=()
   if [[ -n "${TMUX:-}" ]]; then
     self="$(tmux display-message -p '#{session_name}' 2>/dev/null || true)"
   fi
   mapfile -t wss < <(workspaces)
   for ws in "${wss[@]}"; do
-    name="claude-${ws##*/}"
-    tmux has-session -t "=$name" 2>/dev/null || continue
-    if [[ $name == "$self" ]]; then
-      log "${ws##*/}: this command runs inside it — leaving it alone"; continue
-    fi
-    tmux kill-session -t "=$name" && log "${ws##*/}: stopped"
+    key="$(ws_key "$ws")"
+    mapfile -t lines < <(agents_of "$ws")
+    for a in "${lines[@]}"; do
+      read -r a _ <<<"$a"
+      name="$a-$key"
+      tmux has-session -t "=$name" 2>/dev/null || continue
+      if [[ $name == "$self" ]]; then
+        log "$(label "${ws##*/}" "$a"): this command runs inside it — leaving it alone"; continue
+      fi
+      tmux kill-session -t "=$name" && log "$(label "${ws##*/}" "$a"): stopped"
+    done
   done
 }
 
@@ -168,13 +187,13 @@ DIALOG_RE="${CT_AUTOSTART_DIALOG_RE:-Enter to confirm|Do you trust|New MCP serve
 # always shows the input box, whose top border carries the session name
 # (`──── <workspace> ─`, from `claude --name`). Every dialog replaces it. Warn
 # only — answering a dialog is a person's call.
-screen_problem() { # base -> prints the problem, returns 1 if there is none
+screen_problem() { # session display-name -> prints the problem, returns 1 if there is none
   local s
   # The trailing colon makes `=name` a session-qualified PANE; capture-pane
   # rejects a bare `=name`, and an error swallowed there reads as "all quiet".
-  s=$(tmux capture-pane -p -t "=claude-$1:" 2>/dev/null) || { echo "its screen could not be read"; return 0; }
+  s=$(tmux capture-pane -p -t "=$1:" 2>/dev/null) || { echo "its screen could not be read"; return 0; }
   if [[ -z ${s//[[:space:]]/} ]]; then echo "blank screen"; return 0; fi
-  grep -qF -- "─ $1 ─" <<<"$s" && return 1
+  grep -qF -- "─ $2 ─" <<<"$s" && return 1
   if grep -qE "$DIALOG_RE" <<<"$s"; then
     echo "waiting at a prompt: $(grep -m1 -E "$DIALOG_RE" <<<"$s" | sed 's/^[[:space:]]*//')"
   else
@@ -190,59 +209,111 @@ untrusted() { # workspace dir -> true when ~/.claude.json does not trust it
   [[ $(jq -r --arg p "$1" '.projects[$p].hasTrustDialogAccepted // false' "$HOME/.claude.json" 2>/dev/null) != true ]]
 }
 
+# opencode's health is not on its screen: it serves an HTTP API on the port ct
+# recorded, and asking that is a sturdier check than reading a TUI. Like the
+# screen check this only WARNS — a session that is up but not answering may be
+# mid-way through something a person would not want killed.
+http_problem() { # port -> prints the problem, returns 1 if there is none
+  local body
+  command -v curl >/dev/null 2>&1 || return 1   # nothing to probe with: say nothing
+  [[ -n $1 ]] || { echo "no port recorded for it"; return 0; }
+  body=$(curl -fsS -m "${CT_AUTOSTART_PROBE_TIMEOUT:-5}" "http://127.0.0.1:$1/global/health" 2>&1) ||
+    { echo "its server on port $1 does not answer (${body//$'\n'/ })"; return 0; }
+  [[ $body == *'"healthy":true'* ]] && return 1
+  echo "its server on port $1 reports: $body"
+  return 0
+}
+
+health_problem() { # agent session base port -> prints the problem, returns 1 if none
+  case "$1" in
+    claude)   screen_problem "$2" "$3" ;;
+    opencode) http_problem "$4" ;;
+    *)        return 1 ;;
+  esac
+}
+
 run_round() {
-  local ws base key out note problem started=0 skipped=0 failed=0 warned=0 wss=()
+  local ws base key name a port lbl out note problem started=0 skipped=0 failed=0 warned=0 wss=() lines=() line
   # Collected first, not read in a `while read` loop: ct and tmux inside the
   # loop body would inherit that loop's stdin and could swallow the list.
   mapfile -t wss < <(workspaces)
   for ws in "${wss[@]}"; do
     base=${ws##*/}
+    key="$(ws_key "$ws")"
+    mapfile -t lines < <(agents_of "$ws")
+    for line in "${lines[@]}"; do
+      read -r a port <<<"$line"
+      name="$a-$key"
+      lbl="$(label "$base" "$a")"
 
-    # Idempotent: re-running must not double-start anything. Note this exits 1
-    # with "no server running" when the tmux server is absent, which is exactly
-    # the state at boot — so it must not be treated as an error.
-    if tmux has-session -t "=claude-$base" 2>/dev/null; then
-      if problem=$(screen_problem "$base"); then
-        log "$base: WARNING — running, but $problem"; warned=$((warned+1))
-      else
-        log "$base: already running — skipping"
+      # Idempotent: re-running must not double-start anything. Note this exits 1
+      # with "no server running" when the tmux server is absent, which is exactly
+      # the state at boot — so it must not be treated as an error.
+      if tmux has-session -t "=$name" 2>/dev/null; then
+        if problem=$(health_problem "$a" "$name" "$base" "$port"); then
+          log "$lbl: WARNING — running, but $problem"; warned=$((warned+1))
+        else
+          log "$lbl: already running — skipping"
+        fi
+        skipped=$((skipped+1)); continue
       fi
-      skipped=$((skipped+1)); continue
-    fi
 
-    # Transcript check, for the log only. A workspace IS an agent — retiring
-    # one means removing its workspace — so one without a transcript (created,
-    # never prompted) gets a fresh session. Skipping it, as before, made a new
-    # agent vanish at its first pod restart. Claude keys project dirs by cwd
-    # with slashes turned into hyphens, so these names START WITH A HYPHEN:
-    # ls/find/stat parse that as an option. Bash globs only.
-    key="$HOME/.claude/projects/${ws//\//-}"
-    note=""
-    if ! glob_any "$key" '*.jsonl'; then
-      note=" (no transcript yet — fresh session)"
-      untrusted "$ws" && note="$note — not trusted yet, will likely wait at the trust dialog"
-    fi
+      # Transcript check, for the log only, and only Claude's. A workspace IS an
+      # agent — retiring one means removing its workspace — so one without a
+      # transcript (created, never prompted) gets a fresh session. Skipping it,
+      # as before, made a new agent vanish at its first pod restart. Claude keys
+      # project dirs by cwd with slashes turned into hyphens, so these names
+      # START WITH A HYPHEN: ls/find/stat parse that as an option. Bash globs
+      # only. opencode resumes from its own store (ct passes --continue).
+      note=""
+      if [[ $a == claude ]] && ! glob_any "$HOME/.claude/projects/${ws//\//-}" '*.jsonl'; then
+        note=" (no transcript yet — fresh session)"
+        untrusted "$ws" && note="$note — not trusted yet, will likely wait at the trust dialog"
+      fi
 
-    # No --continue here any more: ct resumes the workspace's best transcript BY
-    # ID on its own (see ct_pick_session). `--continue` only ever meant "most
-    # recent in this directory", which silently prefers a stub left behind by an
-    # accidental fresh start — exactly the failure this loop must not automate
-    # across a whole fleet at boot.
-    # Capture ct's output instead of discarding it. The first real boot logged
-    # "FAILED to start" twelve times with no reason attached, because this line
-    # sent stderr to /dev/null — the same silent-failure shape the rest of this
-    # script is written to avoid.
-    if out=$( cd "$ws" && CT_DETACH=1 ct 2>&1 </dev/null ); then
-      log "$base: started$note"; started=$((started+1))
-    else
-      log "$base: FAILED — ${out//$'\n'/ | }"; failed=$((failed+1))
-    fi
-    sleep "${CT_AUTOSTART_STAGGER:-10}"
+      # No --continue here: ct resumes each agent's conversation on its own
+      # (Claude by transcript id, see ct_pick_session). `--continue` only ever
+      # meant "most recent in this directory", which for Claude silently prefers
+      # a stub left behind by an accidental fresh start — exactly the failure
+      # this loop must not automate across a whole fleet at boot.
+      # Capture ct's output instead of discarding it. The first real boot logged
+      # "FAILED to start" twelve times with no reason attached, because this line
+      # sent stderr to /dev/null — the same silent-failure shape the rest of this
+      # script is written to avoid.
+      if out=$( cd "$ws" && CT_AGENT="$a" CT_DETACH=1 ct 2>&1 </dev/null ); then
+        log "$lbl: started$note"; started=$((started+1))
+      else
+        log "$lbl: FAILED — ${out//$'\n'/ | }"; failed=$((failed+1))
+      fi
+      sleep "${CT_AUTOSTART_STAGGER:-10}"
+    done
   done
 
   log "done — started=$started skipped=$skipped failed=$failed warned=$warned"
   [[ $failed -eq 0 ]]
 }
+
+# One warm-up before the herd. Twelve agents starting at once would each try to
+# refresh the same rotating OAuth token within seconds; the first wins and the
+# rest can get invalid_grant, and a claude that exits takes its pane, its
+# session, and — if it is the last one — the tmux server with it. Only when some
+# workspace runs claude: opencode reads its keys from the environment and has no
+# token to race on.
+wants_claude() {
+  local ws wss=()
+  mapfile -t wss < <(workspaces)
+  for ws in "${wss[@]}"; do
+    agents_of "$ws" | grep -q '^claude\b' && return 0
+  done
+  return 1
+}
+if [[ -z "${CT_AUTOSTART_NO_WARMUP:-}" ]] && wants_claude; then
+  if timeout 90 claude -p 'ok' >/dev/null 2>&1; then
+    log "credential warm-up ok"
+  else
+    log "credential warm-up failed (continuing anyway)"
+  fi
+fi
 
 case "$mode" in
   once)    run_round ;;

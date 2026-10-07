@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# curl stub for ct-autostart's opencode health probe: records argv, answers
+# from the environment.
+#   CURL_STUB_LOG    file to append argv lines to
+#   CURL_STUB_FAIL   set: fail like a refused connection (exit 7)
+#   CURL_STUB_BODY   response body (default: a healthy opencode server)
+echo "curl $*" >> "${CURL_STUB_LOG:-/dev/null}"
+if [ -n "${CURL_STUB_FAIL:-}" ]; then
+  echo "curl: (7) Failed to connect to 127.0.0.1" >&2
+  exit 7
+fi
+healthy='{"healthy":true,"version":"0.0.0"}'
+printf '%s\n' "${CURL_STUB_BODY:-$healthy}"
