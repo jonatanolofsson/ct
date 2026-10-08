@@ -12,15 +12,37 @@ This root is not a git repo itself.
   given repo needs them; the symlinks are harmless when unused and save a round-trip. Never copy, edit, commit,
   or print them.
 
-## Make a session (run from this root directory)
-    mkdir -p <session> && cd <session>
-    git clone <url> [<url> …]                 # full clone per repo; dir named from the URL
-    #   ↳ when a repo is reused across sessions, clone against its cache instead — see "Shared object cache"
-    # always, for every clone (relative symlinks → this root's copies); no need to check if the repo uses them:
-    ln -s ../../.env        <repo>/.env
-    ln -s ../../.kubeconfig <repo>/.kubeconfig
-    cd <repo> && direnv allow                 # per clone, if the repo uses a nix flake + direnv
-    git submodule update --init --recursive   # per clone; clone does NOT do this for you
+## Add a repo to your workspace — you are already in it
+An agent starts INSIDE its workspace (`<root>/<workspace>/`); a workspace holds as many repos as the work spans.
+To add one, run this block as it stands — every path is absolute, so it works from any directory. Fill in the
+two names; the site section below says where each repo's URL comes from.
+
+    ws="${CT_WORKSPACE:-$PWD}"               # your workspace dir (ct exports it; else: where you started)
+    root="${WORKSPACE_ROOT:-${ws%/*}}"       # this root: .gitcache/, .env, .kubeconfig and this file
+    repo=<repo-name>                         # the directory it gets, e.g. edgelab-root
+    url=<clone-url>
+    git clone --reference-if-able "$root/.gitcache/$repo.git" "$url" "$ws/$repo"
+    ln -s ../../.env        "$ws/$repo/.env"         # always both, even if the repo doesn't use them
+    ln -s ../../.kubeconfig "$ws/$repo/.kubeconfig"
+    git -C "$ws/$repo" config -f .gitmodules --get-regexp '\.path$' 2>/dev/null | while read -r _ path; do
+      cache="$root/.gitcache/${path##*/}.git"            # each submodule against ITS OWN cache, if one exists
+      if [ -d "$cache" ]; then git -C "$ws/$repo" submodule update --init --reference "$cache" -- "$path"
+      else git -C "$ws/$repo" submodule update --init -- "$path"; fi
+    done
+    git -C "$ws/$repo" submodule update --init --recursive   # nested submodules, if any
+    if [ -f "$ws/$repo/.envrc" ]; then (cd "$ws/$repo" && direnv allow); fi
+
+Then check it, and only then say it is done — a command that printed an error did not succeed:
+
+    ls -la "$ws/$repo/.env" "$ws/$repo/.kubeconfig"   # both must resolve: no "No such file"
+    cat "$ws/$repo/.git/objects/info/alternates"       # an absolute .gitcache path, if a cache existed
+    ls -A "$ws"                                        # only your repos (+ your own files): nothing stray
+
+`--reference-if-able` borrows objects from the cache when it exists and falls back to a plain clone when it does
+not, so always use it. Never clone from, copy, or edit another workspace's clones.
+
+## Make a new workspace — for a person, or when told to
+    mkdir -p <root>/<workspace> && cd <root>/<workspace> && ct    # then add repos with the block above
 
 Tear down = confirm each clone is clean and pushed (`git status`; nothing unpushed), then delete the session dir.
 The canonical creds here are untouched — only the symlinks go.
@@ -31,14 +53,9 @@ under `.gitcache/` (beside this file) hold one shared copy; new clones borrow fr
 store only their own new objects. Working tree, branches, commits, and push stay fully per-clone — only the
 object store is shared, so this doesn't weaken the per-session isolation above.
 
-Use **absolute** cache paths (a relative alternate is resolved against `<repo>/.git/objects` and silently breaks
-if the clone moves). Clone submodules *through* the reference so shared submodules are deduplicated too — i.e.
-don't `--recurse-submodules` on the clone, run the reference-aware `submodule update` instead:
-
-    git clone --reference-if-able "$WORKSPACE_ROOT/.gitcache/<repo>.git" <url> <dest>
-    git -C <dest> submodule update --init --recursive --reference "$WORKSPACE_ROOT/.gitcache/<submodule>.git"
-
-`--reference-if-able` falls back to a normal full clone when no cache exists, so it's always safe to use.
+The clone command is in the recipe above. Its two rules: **absolute** cache paths (a relative alternate is
+resolved against `<repo>/.git/objects` and silently breaks if the clone moves), and submodules cloned *through*
+their own caches rather than with `--recurse-submodules` on the clone, so shared submodules are deduplicated too.
 Which caches exist is discoverable, not documented:  `ls .gitcache/`.
 
 **The one rule that keeps borrowers safe: a cache is append-only.** Never delete a cache dir while any clone

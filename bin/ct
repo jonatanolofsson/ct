@@ -62,6 +62,14 @@ for root in "${ws_roots[@]}"; do
   fi
 done
 
+# What the agent is told about where it is (docs/workspace-conventions.md, "Add a
+# repo"): its workspace, and the root holding .gitcache/, .env and .kubeconfig.
+# Exported into every session, so the recipe's commands run as written. Taken
+# here, before a pinned session swaps  for its own directory: a pinned
+# conversation in a worktree still belongs to the workspace that holds it.
+agent_ws="$workspace"
+agent_root="${agent_ws%/*}"
+
 # --- pinned sessions: one conversation, kept alive by id, outside any workspace ---
 #
 # A workspace has ONE claude agent, so a second conversation that belongs to it —
@@ -308,7 +316,8 @@ if [[ $agent == opencode ]]; then
     cmd+=" $(printf '%q ' "$@")"
   fi
   record_add "opencode $port"
-  tmux new-session -d -s "$name" -c "$workspace" "$cmd"
+  tmux new-session -d -s "$name" -c "$workspace" \
+    -e "CT_WORKSPACE=$agent_ws" -e "WORKSPACE_ROOT=$agent_root" "$cmd"
   tmux set-option -t "$name" @ct_workspace "$workspace" >/dev/null
   tmux set-option -t "$name" @ct_origin "$PWD" >/dev/null
   tmux set-option -t "$name" @ct_agent "$agent" >/dev/null
@@ -408,7 +417,8 @@ if [[ -n $pinned ]]; then
 else
   record_add claude
 fi
-tmux new-session -d -s "$name" -c "$workspace" "$cmd"
+tmux new-session -d -s "$name" -c "$workspace" \
+  -e "CT_WORKSPACE=$agent_ws" -e "WORKSPACE_ROOT=$agent_root" "$cmd"
 tmux set-option -t "$name" @ct_workspace "$workspace" >/dev/null
 tmux set-option -t "$name" @ct_origin "$PWD" >/dev/null
 tmux set-option -t "$name" @ct_agent "$agent" >/dev/null

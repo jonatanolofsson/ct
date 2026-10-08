@@ -26,6 +26,10 @@ Settings are environment variables, never flags. Every argument is forwarded to 
 | `CT_OPENCODE_WEB` | URL template printed for an OpenCode session's web UI; `{port}` is replaced |
 | `CT_OPENCODE_PORT_MIN` / `_MAX` | port range for OpenCode servers (default 4100–4199) |
 | `CT_WORKSPACE_ROOT` | a single workspace root instead of `~/dev` and `~/workspaces` |
+
+ct also *exports* two variables into every agent it starts, so the workspace conventions' "Add a repo"
+recipe runs as written: `CT_WORKSPACE` (the agent's workspace) and `WORKSPACE_ROOT` (the root holding
+`.gitcache/`, `.env` and `.kubeconfig`). A pinned session gets the workspace that holds its directory.
 | `CT_SESSION_ID` + `CT_NAME` | pin one claude conversation by id, run from its own directory (see below) |
 | `CT_WAKE` | `0`: ct-autostart wakes nobody with a message (see below) |
 

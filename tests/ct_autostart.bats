@@ -373,7 +373,7 @@ mkpin() { # name session-id dir
   run env CT_AUTOSTART_NO_WARMUP=1 CT_POD_START_EPOCH=$(date -d '+1 min' +%s) "$REPO/bin/ct-autostart"
   [ "$status" -eq 0 ]
   [[ "$output" == *"forky (pinned): started"* ]]
-  grep -q -- "new-session -d -s claude-forky -c $HOME/dev/agent-one/wt claude --resume fork-1234 --name forky .*machine" "$TMUX_STUB_LOG"
+  grep -q -- "new-session -d -s claude-forky -c $HOME/dev/agent-one/wt .*claude --resume fork-1234 --name forky .*machine" "$TMUX_STUB_LOG"
 }
 
 @test "a pinned session's health is read by its own name; --restart stops it" {

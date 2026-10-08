@@ -174,7 +174,7 @@ record() { cat "$HOME/.local/share/ct/agents/$1"; }
 
 @test "opencode: own session, loopback server, workspace root, --continue" {
   ( cd "$HOME/dev/agent-alpha/repo-x" && CT_AGENT=opencode "$REPO/bin/ct" )
-  grep -qE -- "new-session -d -s opencode-agent-alpha -c $HOME/dev/agent-alpha opencode --port 41[0-9]{2} --hostname 127.0.0.1 --continue" "$TMUX_STUB_LOG"
+  grep -qE -- "new-session -d -s opencode-agent-alpha -c $HOME/dev/agent-alpha .*opencode --port 41[0-9]{2} --hostname 127.0.0.1 --continue" "$TMUX_STUB_LOG"
   grep -q -- 'set-option -t opencode-agent-alpha @ct_agent opencode' "$TMUX_STUB_LOG"
   grep -qE -- 'set-option -t opencode-agent-alpha @ct_port 41[0-9]{2}' "$TMUX_STUB_LOG"
   ! grep -q -- '--name' "$TMUX_STUB_LOG"
@@ -356,4 +356,21 @@ cmd_words() { # session-name -> sets the array W
   ( cd "$dir" && CT_SESSION_ID=fork-1234 CT_NAME=alpha-fork "$REPO/bin/ct" )
   ( cd "$dir" && CT_SESSION_ID=fork-1234 CT_NAME=alpha-fork CT_AGENT_FORGET=1 "$REPO/bin/ct" )
   [ ! -e "$HOME/.local/share/ct/sessions/alpha-fork" ]
+}
+
+# --- where the agent is (v0.6.0): CT_WORKSPACE and WORKSPACE_ROOT
+
+@test "every session is told its workspace and the root, for the conventions' recipe" {
+  ( cd "$HOME/dev/agent-alpha/repo-x" && "$REPO/bin/ct" )
+  grep -q -- "-e CT_WORKSPACE=$HOME/dev/agent-alpha -e WORKSPACE_ROOT=$HOME/dev " "$TMUX_STUB_LOG"
+  : > "$TMUX_STUB_LOG"; : > "$TMUX_STUB_SESSIONS"
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" )
+  grep -q -- "-e CT_WORKSPACE=$HOME/dev/agent-alpha -e WORKSPACE_ROOT=$HOME/dev " "$TMUX_STUB_LOG"
+}
+
+@test "a pinned session in a worktree still belongs to the workspace that holds it" {
+  local dir="$HOME/dev/agent-alpha/.claude/worktrees/wt"; mkdir -p "$dir"
+  mkts "$dir" "fork-1234" 10
+  ( cd "$dir" && CT_SESSION_ID=fork-1234 CT_NAME=alpha-fork "$REPO/bin/ct" )
+  grep -q -- "-c $dir -e CT_WORKSPACE=$HOME/dev/agent-alpha -e WORKSPACE_ROOT=$HOME/dev " "$TMUX_STUB_LOG"
 }
