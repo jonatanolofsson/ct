@@ -95,7 +95,7 @@ run_ct() { ( cd "$1" && shift && run_from="$PWD" "$REPO/bin/ct" "$@" ); }
 # --- auto-resume (2026-09-11 regression: a dead session must not come back empty)
 
 mkts() { # workspace, session-id, lines
-  local key="$HOME/.claude/projects/${1//\//-}"
+  local key; key="$HOME/.claude/projects/$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-')"  # Claude's rule: every non-alphanumeric
   mkdir -p "$key"
   local i; : > "$key/$2.jsonl"
   for ((i=0;i<$3;i++)); do echo '{"type":"user"}' >> "$key/$2.jsonl"; done
@@ -259,4 +259,101 @@ record() { cat "$HOME/.local/share/ct/agents/$1"; }
   ( cd "$HOME/dev/agent-alpha" && CT_AGENT_FORGET=1 "$REPO/bin/ct" )
   [ -f "$HOME/.local/share/ct/agents/agent-alpha" ]
   [ -z "$(record agent-alpha)" ]
+}
+
+# --- wake message (v0.5.0) and pinned sessions
+
+# The command ct handed tmux for a session, decoded back into its words.
+cmd_words() { # session-name -> sets the array W
+  local line cmd
+  line=$(grep -- "new-session -d -s $1 " "$TMUX_STUB_LOG" | tail -1)
+  cmd=${line#*" -c "}; cmd=${cmd#* }   # drop "-c <dir> " (dirs in tests have no spaces)
+  eval "W=( $cmd )"
+}
+
+@test "no CT_WAKE_SINCE (a person running ct): no wake message" {
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  cmd_words claude-agent-alpha
+  [ "${W[-1]}" = "agent-alpha" ]   # last word is --name's value, no prompt after it
+}
+
+@test "resumed after a restart: told the machine restarted, with its last activity" {
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200
+  touch -d '-2 hours' "$HOME/.claude/projects/-"*"agent-alpha/aaaaaaaa-1111.jsonl"
+  ( cd "$HOME/dev/agent-alpha" && CT_WAKE_SINCE=$(date -d '-10 min' +%s) "$REPO/bin/ct" )
+  cmd_words claude-agent-alpha
+  [[ "${W[-1]}" == "ct: this machine restarted"* ]]
+  [[ "${W[-1]}" == *"Your last activity was 2 h 0 min ago."* ]]
+  [[ "${W[-1]}" == *"continue only work the user had already approved"* ]]
+  [[ " ${W[*]} " == *" --resume aaaaaaaa-1111 "* ]]
+}
+
+@test "resumed after dying while the machine was up: told it was restarted" {
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200
+  ( cd "$HOME/dev/agent-alpha" && CT_WAKE_SINCE=$(date -d '-3 days' +%s) "$REPO/bin/ct" )
+  cmd_words claude-agent-alpha
+  [[ "${W[-1]}" == "ct: your session had ended, and ct-autostart started it again"* ]]
+}
+
+@test "CT_WAKE=0, or a fresh session, gets no wake message" {
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200
+  ( cd "$HOME/dev/agent-alpha" && CT_WAKE=0 CT_WAKE_SINCE=1 "$REPO/bin/ct" )
+  cmd_words claude-agent-alpha
+  [ "${W[-1]}" = "agent-alpha" ]
+  : > "$TMUX_STUB_LOG"; : > "$TMUX_STUB_SESSIONS"
+  ( cd "$HOME/dev/agent-alpha-2" && CT_WAKE_SINCE=1 "$REPO/bin/ct" )   # no transcript
+  cmd_words claude-agent-alpha-2
+  [ "${W[-1]}" = "agent-alpha-2" ]
+}
+
+@test "wake.md replaces the text, placeholders filled" {
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200
+  mkdir -p "$HOME/.config/ct"
+  printf 'WOKE: {event} at {time}. {gap}' > "$HOME/.config/ct/wake.md"
+  ( cd "$HOME/dev/agent-alpha" && CT_WAKE_SINCE=$(date -d '+1 min' +%s) "$REPO/bin/ct" )
+  cmd_words claude-agent-alpha
+  [[ "${W[-1]}" == "WOKE: this machine restarted at 20"*". Your last activity was "*" ago." ]]
+}
+
+@test "opencode gets the wake message as --prompt, not when fresh" {
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode CT_WAKE_SINCE=$(date +%s) "$REPO/bin/ct" )
+  cmd_words opencode-agent-alpha
+  [ "${W[-2]}" = "--prompt" ]
+  [[ "${W[-1]}" == "ct: this machine restarted"* ]]
+  : > "$TMUX_STUB_LOG"; : > "$TMUX_STUB_SESSIONS"
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode CT_FRESH=1 CT_WAKE_SINCE=$(date +%s) "$REPO/bin/ct" )
+  ! grep -q -- '--prompt' "$TMUX_STUB_LOG"
+}
+
+@test "pinned: resumes that id under its name, from its dir, and records it" {
+  local dir="$HOME/dev/agent-alpha/.claude/worktrees/wt"; mkdir -p "$dir"
+  mkts "$dir" "fork-1234" 10                    # a short one still counts: it is named
+  ( cd "$dir" && CT_SESSION_ID=fork-1234 CT_NAME=alpha-fork "$REPO/bin/ct" )
+  cmd_words claude-alpha-fork
+  grep -q -- "new-session -d -s claude-alpha-fork -c $dir " "$TMUX_STUB_LOG"
+  [[ " ${W[*]} " == *" --resume fork-1234 --name alpha-fork "* ]]
+  [ "$(cat "$HOME/.local/share/ct/sessions/alpha-fork")" = "claude fork-1234 alpha-fork $dir" ]
+  # the workspace's own record is untouched
+  [ ! -e "$HOME/.local/share/ct/agents/agent-alpha" ]
+}
+
+@test "pinned: refused from the wrong dir, without a name, or for opencode" {
+  mkdir -p "$HOME/dev/agent-alpha/wt"; mkts "$HOME/dev/agent-alpha/wt" "fork-1234" 10
+  run bash -c "cd '$HOME/dev/agent-alpha' && CT_SESSION_ID=fork-1234 CT_NAME=f '$REPO/bin/ct'"
+  [ "$status" -eq 1 ]; [[ "$output" == *"run this from the directory it was started in"* ]]
+  run bash -c "cd '$HOME/dev/agent-alpha/wt' && CT_SESSION_ID=fork-1234 '$REPO/bin/ct'"
+  [ "$status" -eq 2 ]
+  run bash -c "cd '$HOME/dev/agent-alpha/wt' && CT_AGENT=opencode CT_SESSION_ID=fork-1234 CT_NAME=f '$REPO/bin/ct'"
+  [ "$status" -eq 2 ]
+  run bash -c "cd '$HOME/dev/agent-alpha/wt' && CT_SESSION_ID=fork-1234 CT_NAME='two words' '$REPO/bin/ct'"
+  [ "$status" -eq 2 ]
+  ! grep -q new-session "$TMUX_STUB_LOG"
+}
+
+@test "pinned: CT_AGENT_FORGET drops the record" {
+  local dir="$HOME/dev/agent-alpha/wt"; mkdir -p "$dir"; mkts "$dir" "fork-1234" 10
+  ( cd "$dir" && CT_SESSION_ID=fork-1234 CT_NAME=alpha-fork "$REPO/bin/ct" )
+  ( cd "$dir" && CT_SESSION_ID=fork-1234 CT_NAME=alpha-fork CT_AGENT_FORGET=1 "$REPO/bin/ct" )
+  [ ! -e "$HOME/.local/share/ct/sessions/alpha-fork" ]
 }

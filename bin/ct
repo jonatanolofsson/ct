@@ -62,11 +62,45 @@ for root in "${ws_roots[@]}"; do
   fi
 done
 
+# --- pinned sessions: one conversation, kept alive by id, outside any workspace ---
+#
+# A workspace has ONE claude agent, so a second conversation that belongs to it —
+# a fork, an agent working in a worktree — has nowhere to live: a pod restart ends
+# it and nothing brings it back. CT_SESSION_ID + CT_NAME pin that conversation:
+# run from the directory it was started in (Claude keys a conversation on that
+# directory, so `--resume` from anywhere else does not find it), and ct resumes
+# exactly that id under the name, records it, and ct-autostart revives it like a
+# workspace agent.
+pinned=""
+if [[ -n "${CT_SESSION_ID:-}" ]]; then
+  if [[ $agent != claude ]]; then
+    echo "ct: CT_SESSION_ID resumes a claude conversation; it does not apply to CT_AGENT=$agent" >&2; exit 2
+  fi
+  if [[ -z "${CT_NAME:-}" ]]; then
+    echo "ct: CT_SESSION_ID needs CT_NAME, the name to run it under" >&2; exit 2
+  fi
+  if [[ ! $CT_NAME =~ ^[A-Za-z0-9_.-]+$ || ! $CT_SESSION_ID =~ ^[A-Za-z0-9-]+$ ]]; then
+    echo "ct: CT_NAME may hold letters, digits, '.', '_' and '-'; CT_SESSION_ID is a session uuid" >&2; exit 2
+  fi
+  pinned="$CT_SESSION_ID"
+  workspace="$PWD"
+fi
+
 # printf, not `basename`: basename emits a trailing newline, which this tr (a
 # COMPLEMENT class — every character outside the set is replaced) turned into a
 # stray '-' on the end of every session name.
-base="$(printf '%s' "${workspace##*/}" | tr -c 'A-Za-z0-9_-' '-')"
+# The name a person knows it by: the pinned session's own, else the workspace's.
+if [[ -n $pinned ]]; then display="$CT_NAME"; else display="${workspace##*/}"; fi
+base="$(printf '%s' "$display" | tr -c 'A-Za-z0-9_-' '-')"
 name="$agent-$base"
+
+# Where Claude keeps a directory's transcripts: ~/.claude/projects/<key>, where
+# the key is the absolute path with EVERY character that is not a letter or a
+# digit turned into '-' (so `/a/.claude/b c` is `-a--claude-b-c`). Replacing
+# only '/' — what ct did before 0.5.0 — misses any path with a dot or a space,
+# and then nothing resumes. The keys START WITH A HYPHEN: ls/find/stat parse
+# that as an option, so they are only ever used in quoted paths and globs.
+transcripts() { printf '%s/.claude/projects/%s' "$HOME" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-')"; }
 
 # glob_any, not `compgen -G`: compgen exists only when bash was built with
 # programmable completion. Fedora 43's bash has none, so there ct_pick_session
@@ -83,6 +117,10 @@ glob_any() { local f; for f in "$1"/$2; do [[ -e $f || -L $f ]] && return 0; don
 # workspaces that never ran another agent. An EMPTY file means "nothing".
 records="${CT_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ct}/agents"
 record="$records/$base"
+# Pinned sessions have their own records: "claude <session-id> <name> <dir>",
+# one file each, so a workspace's record never lists a conversation from
+# somewhere else.
+pins="${CT_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ct}/sessions"
 
 record_line() { # agent -> its line, if recorded
   [[ -f $record ]] || return 1
@@ -91,7 +129,7 @@ record_line() { # agent -> its line, if recorded
 
 # A Claude agent that predates the record: its transcript, or its session.
 claude_evidence() {
-  glob_any "$HOME/.claude/projects/${workspace//\//-}" '*.jsonl' ||
+  glob_any "$(transcripts "$workspace")" '*.jsonl' ||
     tmux has-session -t "=claude-$base" 2>/dev/null
 }
 
@@ -107,6 +145,12 @@ record_add() { # line
   fi
   echo "$1" >> "$record"
 }
+
+if [[ -n "${CT_AGENT_FORGET:-}" && -n $pinned ]]; then
+  rm -f "$pins/$base"
+  echo "ct: $CT_NAME: ct-autostart will no longer start this pinned session (a running one is left alone)" >&2
+  exit 0
+fi
 
 if [[ -n "${CT_AGENT_FORGET:-}" ]]; then
   if [[ ! -f $record ]]; then
@@ -188,6 +232,56 @@ if tmux has-session -t "=$name" 2>/dev/null; then
   exec tmux attach-session -t "=$name"
 fi
 
+# --- the wake message: what an agent is told when ct-autostart brings it back ---
+#
+# Waking an agent with no word leaves it sitting on an empty prompt, unaware that
+# every background shell, watcher and port-forward it had died with it — and a
+# conversation that ended mid-wait ("I'll check when CI finishes") never picks up.
+# So a resumed agent's first message says what happened and what to do.
+#
+# Sent only when ct-autostart asks (CT_WAKE_SINCE = when this machine or
+# container started, epoch seconds) and only on a RESUMED conversation: a
+# fresh session has nothing to re-check, and a person running `ct` is right
+# there to say it themselves. CT_WAKE=0 switches it off; ~/.config/ct/wake.md
+# (or CT_WAKE_FILE) replaces the text, with {event}, {time} and {gap}.
+ct_human_gap() { # seconds -> "2 h 5 min"
+  local s=$1
+  if ((s < 120)); then echo "$s s"
+  elif ((s < 7200)); then echo "$((s / 60)) min"
+  elif ((s < 172800)); then echo "$((s / 3600)) h $((s % 3600 / 60)) min"
+  else echo "$((s / 86400)) days"; fi
+}
+
+wake_text() { # last-activity epoch, or "" if unknown -> the message on stdout, or nothing
+  local last="$1" since="${CT_WAKE_SINCE:-}" now event gap tpl file
+  [[ -n $since && "${CT_WAKE:-1}" != 0 ]] || return 1
+  now=$(date +%s)
+  if [[ -n $last ]]; then
+    # It was alive when this machine started: the restart is what ended it.
+    if ((last < since)); then event="this machine restarted"
+    else event="your session had ended, and ct-autostart started it again"; fi
+    gap="Your last activity was $(ct_human_gap $((now - last))) ago."
+  else
+    # No activity time to compare (opencode keeps one store for everything):
+    # a wake soon after the machine started is that start; later, it is not.
+    if ((now - since < ${CT_WAKE_BOOT_WINDOW:-1800})); then event="this machine restarted"
+    else event="your session had ended, and ct-autostart started it again"; fi
+    gap=""
+  fi
+  file="${CT_WAKE_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/ct/wake.md}"
+  if [[ -r $file ]]; then
+    tpl=$(cat "$file")
+  else
+    tpl="ct: {event} ({time}). {gap} Your conversation is intact, but everything that lived in processes is gone: background shells and the watchers in them, port-forwards, anything you had running beside this session. Check the state of what you were in the middle of — git status, CI runs or deploys in flight — and re-establish what you need. Tell the user in one or two lines where you stand, then continue only work the user had already approved. Do not start anything new."
+  fi
+  tpl=${tpl//\{event\}/$event}
+  tpl=${tpl//\{time\}/$(date '+%Y-%m-%d %H:%M %Z')}
+  # An unknown gap leaves no gap: drop the placeholder with its trailing space.
+  [[ -z $gap ]] && tpl=${tpl//\{gap\} /}
+  tpl=${tpl//\{gap\}/$gap}
+  printf '%s' "$tpl"
+}
+
 # Quote arguments individually; the previous "claude ${*:-}" form word-split any
 # argument containing spaces.
 if [[ $agent == opencode ]]; then
@@ -206,6 +300,9 @@ if [[ $agent == opencode ]]; then
   done
   if ((resuming == 0)) && [[ -z "${CT_FRESH:-}" ]]; then
     cmd+=" --continue"
+    if wake="$(wake_text "")"; then
+      cmd+=" --prompt $(printf '%q' "$wake")"
+    fi
   fi
   if (($#)); then
     cmd+=" $(printf '%q ' "$@")"
@@ -244,7 +341,7 @@ cmd="claude"
 #
 ct_pick_session() {
   local dir="$1" min="${CT_MIN_LINES:-50}" key best=""
-  key="$HOME/.claude/projects/${dir//\//-}"
+  key="$(transcripts "$dir")"
   glob_any "$key" '*.jsonl' || return 1
   # newest first; take the first one that is more than a stub
   while IFS= read -r f; do
@@ -259,11 +356,22 @@ resuming=0
 for a in "$@"; do
   case "$a" in -c|--continue|-r|--resume|--resume=*|--fork-session) resuming=1 ;; esac
 done
-if ((resuming == 0)) && [[ -z "${CT_FRESH:-}" ]]; then
-  if sid="$(ct_pick_session "$workspace")"; then
-    cmd+=" --resume $(printf '%q' "$sid")"
-    echo "ct: resuming $sid (CT_FRESH=1 for a new conversation)" >&2
+sid=""
+if [[ -n $pinned ]]; then
+  # The pinned id, from the directory it lives under — or a clear refusal, since
+  # `claude --resume <id>` from the wrong directory just starts empty.
+  if [[ ! -e "$(transcripts "$workspace")/$pinned.jsonl" ]]; then
+    echo "ct: no conversation $pinned under $workspace — run this from the directory it was started in" >&2
+    exit 1
   fi
+  sid="$pinned"
+elif ((resuming == 0)) && [[ -z "${CT_FRESH:-}" ]]; then
+  sid="$(ct_pick_session "$workspace")" || sid=""
+fi
+if [[ -n $sid ]]; then
+  cmd+=" --resume $(printf '%q' "$sid")"
+  if [[ -n $pinned ]]; then echo "ct: resuming $sid as $CT_NAME" >&2
+  else echo "ct: resuming $sid (CT_FRESH=1 for a new conversation)" >&2; fi
 fi
 
 # Name the CLAUDE session after the workspace as well. Without -n every session
@@ -275,11 +383,16 @@ for a in "$@"; do
   case "$a" in -n|--name|--name=*) named=1 ;; esac
 done
 if ((named == 0)); then
-  cmd+=" --name $(printf '%q' "${workspace##*/}")"
+  cmd+=" --name $(printf '%q' "$display")"
 fi
 
 if (($#)); then
   cmd+=" $(printf '%q ' "$@")"
+fi
+
+# The wake message is claude's initial prompt: a positional argument, so last.
+if [[ -n $sid ]] && wake="$(wake_text "$(stat -c %Y "$(transcripts "$workspace")/$sid.jsonl" 2>/dev/null)")"; then
+  cmd+=" $(printf '%q' "$wake")"
 fi
 
 # Start claude at the WORKSPACE root, never in $PWD. Claude keys its transcript
@@ -289,7 +402,12 @@ fi
 # workspace path: two keys for one agent, and the next resume missing the
 # conversation. One start directory gives one key. @ct_origin still records
 # where ct was run, for the attach message.
-record_add claude
+if [[ -n $pinned ]]; then
+  mkdir -p "$pins"
+  printf 'claude %s %s %s\n' "$pinned" "$CT_NAME" "$workspace" > "$pins/$base"
+else
+  record_add claude
+fi
 tmux new-session -d -s "$name" -c "$workspace" "$cmd"
 tmux set-option -t "$name" @ct_workspace "$workspace" >/dev/null
 tmux set-option -t "$name" @ct_origin "$PWD" >/dev/null

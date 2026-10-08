@@ -87,6 +87,22 @@ Every workspace gets its agents back, each resuming its own conversation:
 
 A workspace IS an agent; to retire one, remove its directory.
 
+A conversation pinned with `CT_SESSION_ID` + `CT_NAME` is revived too. It is recorded in
+`~/.local/share/ct/sessions/<name>` as `claude <session-id> <name> <dir>`, and started with
+`CT_SESSION_ID=<id> CT_NAME=<name> ct` from that directory. If the directory is gone, the pass logs a
+`WARNING` and does not count it as a failure.
+
+**The wake message.** Every agent a pass *resumes* gets a first message saying what happened, and what
+to check and do. Claude gets it as its initial prompt, OpenCode as `--prompt`.
+- ct tells "the machine restarted" apart from "the session ended while it was up" by comparing the
+  conversation's last activity with when PID 1 started. In a container, that is the container's
+  start.
+- OpenCode has no per-conversation activity time, so it counts as a restart when it is woken within 30
+  minutes of that start (`CT_WAKE_BOOT_WINDOW`).
+- Fresh sessions are not woken.
+- `CT_WAKE=0` turns the message off, and `~/.config/ct/wake.md` replaces it.
+- Every resumed agent runs one turn at boot, staggered by `CT_AUTOSTART_STAGGER`.
+
 **Which agents** a workspace runs is ct's record, `~/.local/share/ct/agents/<workspace>`. ct writes it
 whenever it launches an agent, with one line per agent: `claude`, or `opencode <port>`.
 - **No record** means `claude`, exactly as before agents existed. An existing pod therefore upgrades with

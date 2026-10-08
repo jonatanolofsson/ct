@@ -31,12 +31,16 @@ saved conversation. Log: `~/.ct-autostart.log`. Expect
 Which agents each workspace ran is in `~/.local/share/ct/agents/<session>`. A workspace with no file there
 ran Claude only.
 
+Agents that `ct-autostart` brought back already received a message saying the machine restarted.
+They should be posting where they stand. A pinned session (`~/.local/share/ct/sessions/`) comes back
+the same way. By hand: `cd <its dir> && CT_SESSION_ID=<id> CT_NAME=<name> ct`.
+
 ## 3. Three traps (each has bitten for real)
 
 1. **`--continue` is not optional** on first launch after a restart. A bare
    `ct` starts a FRESH conversation and the context is gone from that session
    (the transcript file still exists — resume it explicitly by id if this
-   happens: transcripts live in `~/.claude/projects/<cwd-with-slashes-as-hyphens>/`,
+   happens: transcripts live in `~/.claude/projects/<cwd with every non-alphanumeric character as a hyphen>/`,
    and each `<uuid>.jsonl` filename is a session id `claude --resume <uuid>` accepts).
 2. **`ct -d` does not mean detach.** Unknown arguments are forwarded to
    `claude`, where `-d` means `--debug`. Detached start is `CT_DETACH=1 ct …`.

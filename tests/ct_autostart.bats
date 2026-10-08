@@ -17,7 +17,7 @@ setup() {
   unset CT_AUTOSTART_GLOB CT_AUTOSTART_FORCE CT_AUTOSTART_INTERVAL CT_AUTOSTART_RETRY CT_AUTOSTART_DIALOG_RE CT_WORKSPACE_ROOT CT_FRESH CT_DETACH
   # transcript dir names are the cwd with / -> -  (they START with a hyphen)
   mktranscript() {
-    local ws="$1"; local key="$HOME/.claude/projects/${ws//\//-}"
+    local ws="$1"; local key; key="$HOME/.claude/projects/$(printf '%s' "$ws" | tr -c 'A-Za-z0-9' '-')"
     mkdir -p "$key" && for _ in $(seq 60); do printf "%s\n" "{\"sessionId\":\"x\"}"; done > "$key/x.jsonl"
   }
   export -f mktranscript
@@ -329,4 +329,78 @@ mkrecord() { mkdir -p "$HOME/.local/share/ct/agents"; printf '%b' "$2" > "$HOME/
   ! grep -q -- 'kill-session -t =claude-agent-one' "$TMUX_STUB_LOG"
   [[ "$output" == *"agent-one: this command runs inside it"* ]]
   grep -q -- 'new-session -d -s opencode-agent-one ' "$TMUX_STUB_LOG"
+}
+
+# --- wake message and pinned sessions (v0.5.0)
+
+mkpin() { # name session-id dir
+  mkdir -p "$HOME/.local/share/ct/sessions" "$3"
+  printf 'claude %s %s %s\n' "$2" "$1" "$3" > "$HOME/.local/share/ct/sessions/$1"
+  local key; key="$HOME/.claude/projects/$(printf '%s' "$3" | tr -c 'A-Za-z0-9' '-')"
+  mkdir -p "$key"; for _ in $(seq 60); do echo '{}'; done > "$key/$2.jsonl"
+}
+
+@test "a resumed agent is woken with what happened" {
+  touch "$HOME/.ct-autostart"
+  mktranscript "$HOME/dev/agent-one"
+  run env CT_AUTOSTART_NO_WARMUP=1 CT_POD_START_EPOCH=$(date -d '+1 min' +%s) "$REPO/bin/ct-autostart"
+  [ "$status" -eq 0 ]
+  grep -q -- 'new-session -d -s claude-agent-one .*machine' "$TMUX_STUB_LOG"
+  # agent-two has no transcript: a fresh session, nothing to wake
+  ! grep -q -- 'new-session -d -s claude-agent-two .*machine' "$TMUX_STUB_LOG"
+}
+
+@test "CT_WAKE=0 wakes nobody" {
+  touch "$HOME/.ct-autostart"
+  mktranscript "$HOME/dev/agent-one"
+  run env CT_WAKE=0 CT_AUTOSTART_NO_WARMUP=1 CT_POD_START_EPOCH=$(date +%s) "$REPO/bin/ct-autostart"
+  grep -q -- 'new-session -d -s claude-agent-one ' "$TMUX_STUB_LOG"
+  ! grep -q -- 'machine' "$TMUX_STUB_LOG"
+}
+
+@test "the machine's start is read from /proc when not given" {
+  touch "$HOME/.ct-autostart"
+  mktranscript "$HOME/dev/agent-one"
+  touch -d '2000-01-01' "$HOME/.claude/projects/"*agent-one/*.jsonl   # long before any boot
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  grep -q -- 'new-session -d -s claude-agent-one .*this\\ machine\\ restarted\|this machine restarted' "$TMUX_STUB_LOG"
+}
+
+@test "a pinned session is revived by its id, in its dir, and woken" {
+  touch "$HOME/.ct-autostart"
+  mkpin forky fork-1234 "$HOME/dev/agent-one/wt"
+  mkrecord agent-one ''; mkrecord agent-two ''
+  run env CT_AUTOSTART_NO_WARMUP=1 CT_POD_START_EPOCH=$(date -d '+1 min' +%s) "$REPO/bin/ct-autostart"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"forky (pinned): started"* ]]
+  grep -q -- "new-session -d -s claude-forky -c $HOME/dev/agent-one/wt claude --resume fork-1234 --name forky .*machine" "$TMUX_STUB_LOG"
+}
+
+@test "a pinned session's health is read by its own name; --restart stops it" {
+  touch "$HOME/.ct-autostart"
+  mkpin forky fork-1234 "$HOME/dev/agent-one/wt"
+  mkrecord agent-one ''; mkrecord agent-two ''
+  echo "claude-forky" > "$TMUX_STUB_SESSIONS"
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  [[ "$output" == *"forky (pinned): already running — skipping"* ]]
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart" --restart
+  grep -q -- 'kill-session -t =claude-forky' "$TMUX_STUB_LOG"
+}
+
+@test "a pinned session whose dir is gone is a WARNING, not a failure" {
+  touch "$HOME/.ct-autostart"
+  mkpin forky fork-1234 "$HOME/dev/agent-one/wt"; rm -rf "$HOME/dev/agent-one/wt"
+  mkrecord agent-one ''; mkrecord agent-two ''
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"forky (pinned): WARNING — its directory"*"is gone"* ]]
+  ! grep -q new-session "$TMUX_STUB_LOG"
+}
+
+@test "a pinned claude session alone still gets the warm-up" {
+  touch "$HOME/.ct-autostart"
+  mkpin forky fork-1234 "$HOME/dev/agent-one/wt"
+  mkrecord agent-one 'opencode 4150\n'; mkrecord agent-two ''
+  run "$REPO/bin/ct-autostart"
+  grep -q "claude -p ok" "$CLAUDE_STUB_LOG"
 }

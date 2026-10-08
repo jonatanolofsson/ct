@@ -136,7 +136,13 @@ workspaces() {
 # sanitising exactly, or this script would look for sessions ct never names.
 ws_key() { printf '%s' "${1##*/}" | tr -c 'A-Za-z0-9_-' '-'; }
 
-records="${CT_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ct}/agents"
+state="${CT_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ct}"
+records="$state/agents"
+pins="$state/sessions"
+
+# Where Claude keeps a directory's transcripts: every character that is not a
+# letter or a digit becomes '-'. Same rule as ct's transcripts(); see there.
+transcripts() { printf '%s/.claude/projects/%s' "$HOME" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-')"; }
 
 # A workspace's agents, one line each: "claude", or "opencode <port>". No record
 # means claude — see the header. An empty record means none.
@@ -152,27 +158,65 @@ label() { # base agent
   if [[ $2 == claude ]]; then printf '%s' "$1"; else printf '%s [%s]' "$1" "$2"; fi
 }
 
-# --restart: stop the sessions this script manages and nothing else. Never the
-# session running this command — killing that ends the very agent that asked
-# for the restart, mid-command, before any new session has started.
-stop_managed() {
-  local self="" ws key a _ name wss=() lines=()
-  if [[ -n "${TMUX:-}" ]]; then
-    self="$(tmux display-message -p '#{session_name}' 2>/dev/null || true)"
-  fi
+# Everything this script manages, one unit per line, fields separated by the
+# ASCII unit separator (0x1f) — not tab: tab is whitespace to `read`, so an
+# empty field (claude has no port) would collapse and shift every field after it:
+#   agent  port  tmux-name  log-label  display-name  dir  session-id
+# A workspace agent has an empty session id (ct picks the conversation); a
+# pinned session (ct CT_SESSION_ID) carries its own, and its dir is the one the
+# conversation is keyed on.
+US=$'\x1f'
+unit() { local IFS=$US; printf '%s\n' "$*"; }  # one unit, fields joined by US
+units() {
+  local ws key a port line f sid pname dir wss=() lines=()
   mapfile -t wss < <(workspaces)
   for ws in "${wss[@]}"; do
     key="$(ws_key "$ws")"
     mapfile -t lines < <(agents_of "$ws")
-    for a in "${lines[@]}"; do
-      read -r a _ <<<"$a"
-      name="$a-$key"
-      tmux has-session -t "=$name" 2>/dev/null || continue
-      if [[ $name == "$self" ]]; then
-        log "$(label "${ws##*/}" "$a"): this command runs inside it — leaving it alone"; continue
-      fi
-      tmux kill-session -t "=$name" && log "$(label "${ws##*/}" "$a"): stopped"
+    for line in "${lines[@]}"; do
+      read -r a port <<<"$line"
+      unit "$a" "$port" "$a-$key" "$(label "${ws##*/}" "$a")" "${ws##*/}" "$ws" ""
     done
+  done
+  for f in "$pins"/*; do
+    [[ -f $f ]] || continue
+    read -r a sid pname dir < "$f"
+    [[ $a == claude && -n $sid && -n $pname && -n $dir ]] || { log "${f##*/}: unreadable pinned-session record — skipping"; continue; }
+    unit claude "" "claude-$(ws_key "$pname")" "$pname (pinned)" "$pname" "$dir" "$sid"
+  done
+}
+
+# When this machine — or this container — started, in epoch seconds: PID 1's
+# start time, from /proc (ticks since boot, plus the boot time). An agent whose
+# last activity is older than this was alive at the restart; one that is newer
+# died while the machine was up. CT_POD_START_EPOCH overrides it (tests).
+machine_start() {
+  [[ -n "${CT_POD_START_EPOCH:-}" ]] && { echo "$CT_POD_START_EPOCH"; return; }
+  local ticks btime hz
+  # Field 22 counted after the ")" that ends comm, which may itself hold spaces.
+  ticks=$(sed 's/^.*) //' /proc/1/stat 2>/dev/null | awk '{print $20}')
+  btime=$(awk '/^btime/ {print $2}' /proc/stat 2>/dev/null)
+  hz=$(getconf CLK_TCK 2>/dev/null)
+  [[ -n $ticks && -n $btime && -n $hz ]] || return 1
+  echo $(( btime + ticks / hz ))
+}
+
+# --restart: stop the sessions this script manages and nothing else. Never the
+# session running this command — killing that ends the very agent that asked
+# for the restart, mid-command, before any new session has started.
+stop_managed() {
+  local self="" a port name lbl _ us=()
+  if [[ -n "${TMUX:-}" ]]; then
+    self="$(tmux display-message -p '#{session_name}' 2>/dev/null || true)"
+  fi
+  mapfile -t us < <(units)
+  for u in "${us[@]}"; do
+    IFS=$US read -r a port name lbl _ <<<"$u"
+    tmux has-session -t "=$name" 2>/dev/null || continue
+    if [[ $name == "$self" ]]; then
+      log "$lbl: this command runs inside it — leaving it alone"; continue
+    fi
+    tmux kill-session -t "=$name" && log "$lbl: stopped"
   done
 }
 
@@ -232,61 +276,75 @@ health_problem() { # agent session base port -> prints the problem, returns 1 if
   esac
 }
 
+# Start one unit through ct, from its directory. `wake` (set by run_round) adds
+# CT_WAKE_SINCE when the wake message is on.
+launch() { # agent session-id display-name
+  if [[ -n $2 ]]; then
+    env ${wake[@]+"${wake[@]}"} CT_SESSION_ID="$2" CT_NAME="$3" CT_DETACH=1 ct
+  else
+    env ${wake[@]+"${wake[@]}"} CT_AGENT="$1" CT_DETACH=1 ct
+  fi
+}
+
 run_round() {
-  local ws base key name a port lbl out note problem started=0 skipped=0 failed=0 warned=0 wss=() lines=() line
+  local u a port name lbl display dir sid out note problem since="" started=0 skipped=0 failed=0 warned=0 us=()
+  wake=()
+  # The wake message (ct's wake_text): every agent this pass RESUMES is told
+  # what happened. ct decides restart-vs-died from this and the conversation's
+  # last activity, and stays silent for a fresh session. CT_WAKE=0: off.
+  if [[ "${CT_WAKE:-1}" != 0 ]] && since=$(machine_start); then
+    wake=(CT_WAKE_SINCE="$since")
+  fi
   # Collected first, not read in a `while read` loop: ct and tmux inside the
   # loop body would inherit that loop's stdin and could swallow the list.
-  mapfile -t wss < <(workspaces)
-  for ws in "${wss[@]}"; do
-    base=${ws##*/}
-    key="$(ws_key "$ws")"
-    mapfile -t lines < <(agents_of "$ws")
-    for line in "${lines[@]}"; do
-      read -r a port <<<"$line"
-      name="$a-$key"
-      lbl="$(label "$base" "$a")"
+  mapfile -t us < <(units)
+  for u in "${us[@]}"; do
+    IFS=$US read -r a port name lbl display dir sid <<<"$u"
 
-      # Idempotent: re-running must not double-start anything. Note this exits 1
-      # with "no server running" when the tmux server is absent, which is exactly
-      # the state at boot — so it must not be treated as an error.
-      if tmux has-session -t "=$name" 2>/dev/null; then
-        if problem=$(health_problem "$a" "$name" "$base" "$port"); then
-          log "$lbl: WARNING — running, but $problem"; warned=$((warned+1))
-        else
-          log "$lbl: already running — skipping"
-        fi
-        skipped=$((skipped+1)); continue
-      fi
-
-      # Transcript check, for the log only, and only Claude's. A workspace IS an
-      # agent — retiring one means removing its workspace — so one without a
-      # transcript (created, never prompted) gets a fresh session. Skipping it,
-      # as before, made a new agent vanish at its first pod restart. Claude keys
-      # project dirs by cwd with slashes turned into hyphens, so these names
-      # START WITH A HYPHEN: ls/find/stat parse that as an option. Bash globs
-      # only. opencode resumes from its own store (ct passes --continue).
-      note=""
-      if [[ $a == claude ]] && ! glob_any "$HOME/.claude/projects/${ws//\//-}" '*.jsonl'; then
-        note=" (no transcript yet — fresh session)"
-        untrusted "$ws" && note="$note — not trusted yet, will likely wait at the trust dialog"
-      fi
-
-      # No --continue here: ct resumes each agent's conversation on its own
-      # (Claude by transcript id, see ct_pick_session). `--continue` only ever
-      # meant "most recent in this directory", which for Claude silently prefers
-      # a stub left behind by an accidental fresh start — exactly the failure
-      # this loop must not automate across a whole fleet at boot.
-      # Capture ct's output instead of discarding it. The first real boot logged
-      # "FAILED to start" twelve times with no reason attached, because this line
-      # sent stderr to /dev/null — the same silent-failure shape the rest of this
-      # script is written to avoid.
-      if out=$( cd "$ws" && CT_AGENT="$a" CT_DETACH=1 ct 2>&1 </dev/null ); then
-        log "$lbl: started$note"; started=$((started+1))
+    # Idempotent: re-running must not double-start anything. Note this exits 1
+    # with "no server running" when the tmux server is absent, which is exactly
+    # the state at boot — so it must not be treated as an error.
+    if tmux has-session -t "=$name" 2>/dev/null; then
+      if problem=$(health_problem "$a" "$name" "$display" "$port"); then
+        log "$lbl: WARNING — running, but $problem"; warned=$((warned+1))
       else
-        log "$lbl: FAILED — ${out//$'\n'/ | }"; failed=$((failed+1))
+        log "$lbl: already running — skipping"
       fi
-      sleep "${CT_AUTOSTART_STAGGER:-10}"
-    done
+      skipped=$((skipped+1)); continue
+    fi
+
+    if [[ ! -d $dir ]]; then
+      log "$lbl: WARNING — its directory $dir is gone; not started (CT_SESSION_ID=$sid CT_NAME=$display CT_AGENT_FORGET=1 ct forgets it)"
+      warned=$((warned+1)); continue
+    fi
+
+    # Transcript check, for the log only, and only Claude's. A workspace IS an
+    # agent — retiring one means removing its workspace — so one without a
+    # transcript (created, never prompted) gets a fresh session. Skipping it,
+    # as before, made a new agent vanish at its first pod restart. Bash globs
+    # only: the transcript dirs start with a hyphen. opencode resumes from its
+    # own store (ct passes --continue).
+    note=""
+    if [[ $a == claude && -z $sid ]] && ! glob_any "$(transcripts "$dir")" '*.jsonl'; then
+      note=" (no transcript yet — fresh session)"
+      untrusted "$dir" && note="$note — not trusted yet, will likely wait at the trust dialog"
+    fi
+
+    # No --continue here: ct resumes each agent's conversation on its own
+    # (Claude by transcript id, see ct_pick_session). `--continue` only ever
+    # meant "most recent in this directory", which for Claude silently prefers
+    # a stub left behind by an accidental fresh start — exactly the failure
+    # this loop must not automate across a whole fleet at boot.
+    # Capture ct's output instead of discarding it. The first real boot logged
+    # "FAILED to start" twelve times with no reason attached, because this line
+    # sent stderr to /dev/null — the same silent-failure shape the rest of this
+    # script is written to avoid.
+    if out=$( cd "$dir" && launch "$a" "$sid" "$display" 2>&1 </dev/null ); then
+      log "$lbl: started$note"; started=$((started+1))
+    else
+      log "$lbl: FAILED — ${out//$'\n'/ | }"; failed=$((failed+1))
+    fi
+    sleep "${CT_AUTOSTART_STAGGER:-10}"
   done
 
   log "done — started=$started skipped=$skipped failed=$failed warned=$warned"
@@ -300,12 +358,7 @@ run_round() {
 # workspace runs claude: opencode reads its keys from the environment and has no
 # token to race on.
 wants_claude() {
-  local ws wss=()
-  mapfile -t wss < <(workspaces)
-  for ws in "${wss[@]}"; do
-    agents_of "$ws" | grep -q '^claude\b' && return 0
-  done
-  return 1
+  units | cut -d "$US" -f1 | grep -qx claude
 }
 if [[ -z "${CT_AUTOSTART_NO_WARMUP:-}" ]] && wants_claude; then
   if timeout 90 claude -p 'ok' >/dev/null 2>&1; then
