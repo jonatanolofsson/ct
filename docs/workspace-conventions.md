@@ -14,13 +14,14 @@ This root is not a git repo itself.
 
 ## Add a repo to your workspace — you are already in it
 An agent starts INSIDE its workspace (`<root>/<workspace>/`); a workspace holds as many repos as the work spans.
-To add one, run this block as it stands — every path is absolute, so it works from any directory. Fill in the
-two names; the site section below says where each repo's URL comes from.
+To add one, **execute this block in your shell** — do not print it as an answer. Every path is absolute, so it
+runs from any directory. Fill in only `url`: the site section below lists each repo's full clone URL. If any
+line fails, stop and fix that line; never fall back to a plain `git clone` or skip the remaining lines.
 
     ws="${CT_WORKSPACE:-$PWD}"               # your workspace dir (ct exports it; else: where you started)
     root="${WORKSPACE_ROOT:-${ws%/*}}"       # this root: .gitcache/, .env, .kubeconfig and this file
-    repo=<repo-name>                         # the directory it gets, e.g. edgelab-root
-    url=<clone-url>
+    url=<clone-url>                          # the full URL, as the site section lists it
+    repo="${url##*/}"; repo="${repo%.git}"   # its directory and cache name: the URL's last segment
     git clone --reference-if-able "$root/.gitcache/$repo.git" "$url" "$ws/$repo"
     ln -s ../../.env        "$ws/$repo/.env"         # always both, even if the repo doesn't use them
     ln -s ../../.kubeconfig "$ws/$repo/.kubeconfig"

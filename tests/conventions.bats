@@ -30,12 +30,12 @@ setup() {
 recipe() {
   awk '/^## Add a repo/ {f=1; next} f && /^    / {print substr($0,5); b=1; next} f && b {exit}' \
     "$REPO/docs/workspace-conventions.md" |
-    sed -e "s|^repo=<repo-name>.*|repo=proj|" -e "s|^url=<clone-url>.*|url=$UP/proj.git|"
+    sed -e "s|^url=<clone-url>.*|url=$UP/proj.git|"
 }
 
-@test "the doc has the recipe, with both placeholders to fill" {
+@test "the doc has the recipe: one placeholder, the repo name derived from the URL" {
   run recipe
-  [[ "$output" == *"repo=proj"* ]]
+  [[ "$output" == *'repo="${url##*/}"'* ]]
   [[ "$output" == *"url=$UP/proj.git"* ]]
   [[ "$output" == *'--reference-if-able "$root/.gitcache/$repo.git"'* ]]
 }
