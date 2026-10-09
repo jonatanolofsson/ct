@@ -32,6 +32,8 @@ line fails, stop and fix that line; never fall back to a plain `git clone` or sk
     done
     git -C "$ws/$repo" submodule update --init --recursive   # nested submodules, if any
     if [ -f "$ws/$repo/.envrc" ]; then (cd "$ws/$repo" && direnv allow); fi
+    if [ -f "$ws/$repo/CLAUDE.md" ] && [ ! -e "$ws/$repo/AGENTS.md" ]; then   # for agents that read only AGENTS.md
+      ln -s CLAUDE.md "$ws/$repo/AGENTS.md" && echo /AGENTS.md >> "$ws/$repo/.git/info/exclude"; fi
 
 Then check it, and only then say it is done — a command that printed an error did not succeed:
 

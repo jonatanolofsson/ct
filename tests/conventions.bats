@@ -20,6 +20,7 @@ setup() {
   git clone -q --bare "$UP/sub-src" "$UP/sub.git"
   git init -q -b main "$UP/proj-src"
   git -C "$UP/proj-src" submodule -q add "$UP/sub.git" libs/sub
+  printf '# proj\n' > "$UP/proj-src/CLAUDE.md"; git -C "$UP/proj-src" add CLAUDE.md
   git -C "$UP/proj-src" commit -q -m proj
   git clone -q --bare "$UP/proj-src" "$UP/proj.git"
   git clone -q --mirror "$UP/proj.git" "$ROOT/.gitcache/proj.git"
@@ -50,8 +51,23 @@ recipe() {
   # both credential links inside the clone, resolving to the root's files
   [ "$(readlink -f "$WS/proj/.env")" = "$ROOT/.env" ]
   [ "$(readlink -f "$WS/proj/.kubeconfig")" = "$ROOT/.kubeconfig" ]
+  # AGENTS.md links the repo's CLAUDE.md, for agents that read only AGENTS.md,
+  # and git never sees it
+  [ "$(readlink "$WS/proj/AGENTS.md")" = "CLAUDE.md" ]
+  ! git -C "$WS/proj" status --porcelain | grep -q AGENTS.md
   # and nothing stray in the workspace
   [ "$(ls -A "$WS")" = "proj" ]
+}
+
+@test "a repo that already has an AGENTS.md keeps it" {
+  printf '# own agents file\n' > "$UP/proj-src/AGENTS.md"
+  git -C "$UP/proj-src" add AGENTS.md && git -C "$UP/proj-src" commit -q -m agents
+  git -C "$UP/proj-src" push -q "$UP/proj.git" main
+  recipe > "$BATS_TEST_TMPDIR/recipe.sh"
+  ( cd / && CT_WORKSPACE="$WS" WORKSPACE_ROOT="$ROOT" bash -e "$BATS_TEST_TMPDIR/recipe.sh" )
+  [ ! -L "$WS/proj/AGENTS.md" ]
+  [ "$(cat "$WS/proj/AGENTS.md")" = "# own agents file" ]
+  [ -z "$(git -C "$WS/proj" status --porcelain -- AGENTS.md)" ]
 }
 
 @test "without ct's exports, run from the workspace, it does the same" {
