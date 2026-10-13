@@ -1,13 +1,25 @@
 #!/usr/bin/env bash
-# curl stub for ct-autostart's opencode health probe: records argv, answers
-# from the environment.
-#   CURL_STUB_LOG    file to append argv lines to
-#   CURL_STUB_FAIL   set: fail like a refused connection (exit 7)
-#   CURL_STUB_BODY   response body (default: a healthy opencode server)
+# curl stub for the opencode server ct and ct-autostart talk to: records argv,
+# answers by endpoint from the environment.
+#   CURL_STUB_LOG           file to append argv lines to
+#   CURL_STUB_FAIL          set: every call fails like a refused connection (exit 7)
+#   CURL_STUB_HEALTH_FAILS  N: the first N health probes fail, later ones answer
+#                           (counted in CURL_STUB_COUNT, a file)
+#   CURL_STUB_BODY          health response body (default: a healthy server)
+#   CURL_STUB_SESSIONS      body for GET /session (default: [])
 echo "curl $*" >> "${CURL_STUB_LOG:-/dev/null}"
-if [ -n "${CURL_STUB_FAIL:-}" ]; then
-  echo "curl: (7) Failed to connect to 127.0.0.1" >&2
-  exit 7
-fi
-healthy='{"healthy":true,"version":"0.0.0"}'
-printf '%s\n' "${CURL_STUB_BODY:-$healthy}"
+refuse() { echo "curl: (7) Failed to connect to 127.0.0.1" >&2; exit 7; }
+[ -n "${CURL_STUB_FAIL:-}" ] && refuse
+case "$*" in
+  */global/health*)
+    if [ -n "${CURL_STUB_HEALTH_FAILS:-}" ]; then
+      count_file="${CURL_STUB_COUNT:?CURL_STUB_HEALTH_FAILS needs CURL_STUB_COUNT}"
+      n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$count_file"
+      [ "$n" -le "$CURL_STUB_HEALTH_FAILS" ] && refuse
+    fi
+    printf '%s\n' "${CURL_STUB_BODY:-{\"healthy\":true,\"version\":\"0.0.0\"}}" ;;
+  */prompt_async*) : ;;
+  */session*) printf '%s\n' "${CURL_STUB_SESSIONS:-[]}" ;;
+  *) printf '%s\n' "${CURL_STUB_BODY:-{\"healthy\":true,\"version\":\"0.0.0\"}}" ;;
+esac

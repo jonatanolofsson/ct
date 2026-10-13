@@ -25,8 +25,8 @@ saved conversation. Log: `~/.ct-autostart.log`. Expect
     ct --continue                   # resume the saved conversation
     # Ctrl-b d to detach; tmux ls to list; tmux attach -t '=claude-<session>'
 
-    CT_AGENT=opencode ct            # an OpenCode agent: resumes its last session by itself,
-                                    # on the same port as before (tmux attach -t '=opencode-<session>')
+    CT_AGENT=opencode ct            # an OpenCode agent: starts the shared server if needed and
+                                    # resumes the workspace's last session (tmux attach -t '=opencode-<session>')
 
 Which agents each workspace ran is in `~/.local/share/ct/agents/<session>`. A workspace with no file there
 ran Claude only.

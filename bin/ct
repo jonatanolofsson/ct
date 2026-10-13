@@ -22,12 +22,14 @@
 #
 # Agents. CT_AGENT picks which coding agent the session runs: claude (default) or
 # opencode. Each agent gets its own session, <agent>-<workspace>, so one
-# workspace can run both side by side. An opencode session also serves its HTTP
-# API on a loopback port fixed per workspace, so you can join it from a second
-# terminal (`opencode attach`) or from a browser through an authenticating proxy
-# (CT_OPENCODE_WEB). ct records each agent it launches, so ct-autostart can bring
-# that agent back after a pod restart. To stop autostarting an agent in a
-# workspace:  CT_AGENT=<agent> CT_AGENT_FORGET=1 ct
+# workspace can run both side by side. Every opencode session is a terminal
+# attached to ONE opencode server per machine (loopback, CT_OPENCODE_SERVER_PORT,
+# default 4096), which ct starts on first use and keeps running. One server is
+# one address for every workspace's sessions: a second terminal joins with
+# `opencode attach`, a browser through an authenticating proxy (CT_OPENCODE_WEB).
+# ct records each agent it launches, so ct-autostart can bring that agent back
+# after a pod restart. To stop autostarting an agent in a workspace:
+#   CT_AGENT=<agent> CT_AGENT_FORGET=1 ct
 set -euo pipefail
 
 agent="${CT_AGENT:-claude}"
@@ -118,7 +120,9 @@ glob_any() { local f; for f in "$1"/$2; do [[ -e $f || -L $f ]] && return 0; don
 
 # --- agent record: which agents ct-autostart brings back for this workspace ---
 #
-# One file per workspace, one line per agent: "claude", or "opencode <port>".
+# One file per workspace, one line per agent: "claude" or "opencode". (Before
+# 0.7.0 an opencode line also carried its own port, "opencode <port>"; such a
+# line is read as plain "opencode".)
 # On disk, not in tmux options, because those die with the pod and the record
 # is exactly what has to survive it. NO file means "claude" — what every
 # workspace meant before agents existed — so upgrading ct changes nothing for
@@ -172,35 +176,103 @@ if [[ -n "${CT_AGENT_FORGET:-}" ]]; then
   exit 0
 fi
 
-# --- opencode: one loopback port per workspace, kept for good ---
+# --- opencode: one server per machine, one attached terminal per workspace ---
 #
-# Recorded, not just hashed: a hash into 100 ports collides between two of a
-# dozen workspaces more often than not. The hash only picks where the search
-# starts, so a workspace usually lands on the same port it would hash to, and the
-# record makes it permanent — the attach URL and the web path stay the same
-# across pod restarts, so a bookmark keeps working.
-opencode_port() {
-  local line lo="${CT_OPENCODE_PORT_MIN:-4100}" hi="${CT_OPENCODE_PORT_MAX:-4199}" used n i p start
-  if line="$(record_line opencode)" && [[ $line == *" "* ]]; then
-    echo "${line##* }"; return 0
+# Until 0.7.0 every workspace's TUI served its own API on its own port, so each
+# workspace had its own web address. One server gives one address for all of
+# them, and its web UI lists every workspace. The cost: a server restart drops
+# every attached terminal at once (ct-autostart brings them back), and the
+# agents' shells no longer carry CT_WORKSPACE — they run in the workspace
+# directory, which is what the conventions' recipe falls back to.
+oc_port="${CT_OPENCODE_SERVER_PORT:-4096}"
+oc_url="http://127.0.0.1:$oc_port"
+oc_session="ct-opencode-server"   # not opencode-*: that is a workspace's name
+ct_self="$(readlink -f "${BASH_SOURCE[0]}")"
+
+oc_healthy() { curl -fsS -m 3 "$oc_url/global/health" 2>/dev/null | grep -q '"healthy":true'; }
+
+# Start the server in its own tmux session, in a loop so a crash restarts it,
+# then wait until it answers. Loopback only: the way in from outside is an
+# authenticating proxy, never an open port.
+#
+# After a RESTART the loop reopens every terminal attached to this server
+# (CT_OPENCODE_REFRESH, below): a terminal outlives its server's restart, still
+# sends what is typed, but never shows another reply (seen live, 1.18.35), and
+# nothing else would notice — the server answers its health check.
+opencode_server() {
+  local i
+  command -v curl >/dev/null 2>&1 || { echo "ct: opencode needs curl, to reach its server" >&2; return 1; }
+  oc_healthy && return 0
+  if ! tmux has-session -t "=$oc_session" 2>/dev/null; then
+    tmux new-session -d -s "$oc_session" -c "$HOME" \
+      "n=0; while :; do if [ \$n -gt 0 ]; then (CT_OPENCODE_SERVER_PORT=$oc_port CT_OPENCODE_REFRESH=1 $(printf '%q' "$ct_self") &); fi; n=\$((n + 1)); opencode serve --port $oc_port --hostname 127.0.0.1; echo 'ct: opencode server exited; restarting in 2 s'; sleep 2; done"
+    echo "ct: started the opencode server on 127.0.0.1:$oc_port (tmux session '$oc_session')" >&2
   fi
-  used="$(cat "$records"/* 2>/dev/null | awk '$1 == "opencode" && NF > 1 { print $2 }')"
-  n=$((hi - lo + 1))
-  start=$(( $(printf '%s' "$workspace" | cksum | cut -d' ' -f1) % n ))
-  for ((i = 0; i < n; i++)); do
-    p=$((lo + (start + i) % n))
-    grep -qx "$p" <<<"$used" || { echo "$p"; return 0; }
+  for ((i = 0; i < ${CT_OPENCODE_SERVER_WAIT:-60}; i++)); do
+    oc_healthy && return 0
+    sleep 1
   done
-  echo "ct: no free opencode port in $lo-$hi" >&2
+  echo "ct: the opencode server on 127.0.0.1:$oc_port does not answer (see: tmux attach -t '=$oc_session')" >&2
   return 1
 }
 
-opencode_access() { # port -> how to reach the server, on stderr
-  echo "ct: opencode server on 127.0.0.1:$1 — join it with: opencode attach http://127.0.0.1:$1" >&2
+# Percent-encoding for a query value, by hand: curl's --get would also turn a
+# POST body into a query string, and --url-query needs curl 7.87.
+urlencode() { # text -> encoded
+  local LC_ALL=C s="$1" out="" c i
+  for ((i = 0; i < ${#s}; i++)); do
+    c=${s:i:1}
+    case "$c" in [A-Za-z0-9._~/-]) out+="$c" ;; *) out+=$(printf '%%%02X' "'$c") ;; esac
+  done
+  printf '%s' "$out"
+}
+
+# The workspace's most recent session id, from the server (newest first). Not
+# `attach --continue`: on a shared server that means the most recent session of
+# ANY workspace.
+oc_last_session() { # dir -> id on stdout, or nothing
+  curl -fsS -m 10 "$oc_url/session?directory=$(urlencode "$1")" 2>/dev/null |
+    grep -o '"id":"ses_[A-Za-z0-9]*"' | head -1 | cut -d'"' -f4
+}
+
+json_string() { # text -> a JSON string literal
+  local s="$1"
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}; s=${s//$'\t'/\\t}
+  printf '"%s"' "$s"
+}
+
+# Send the wake message into the session before the terminal attaches; `attach`
+# has no prompt option. The session's own model answers it.
+oc_wake() { # dir session text
+  curl -fsS -m 10 -o /dev/null -X POST -H 'content-type: application/json' \
+    --data-binary "{\"parts\":[{\"type\":\"text\",\"text\":$(json_string "$3")}]}" \
+    "$oc_url/session/$2/prompt_async?directory=$(urlencode "$1")" 2>/dev/null ||
+    echo "ct: could not send the wake message to $2 (continuing)" >&2
+}
+
+opencode_access() { # how to reach the server, on stderr
+  echo "ct: opencode server on 127.0.0.1:$oc_port — join this workspace with: opencode attach $oc_url --dir $workspace" >&2
   if [[ -n "${CT_OPENCODE_WEB:-}" ]]; then
-    echo "ct: opencode web: ${CT_OPENCODE_WEB//\{port\}/$1}" >&2
+    echo "ct: opencode web: ${CT_OPENCODE_WEB//\{port\}/$oc_port}" >&2
   fi
 }
+
+# CT_OPENCODE_REFRESH=1: reopen every terminal attached to THIS server, each on
+# the session it showed (ct resumes the workspace's last one). Run by the server
+# loop after a restart. A pre-0.7.0 terminal, which is its own server on another
+# port, is left alone.
+if [[ -n "${CT_OPENCODE_REFRESH:-}" ]]; then
+  while IFS= read -r s; do
+    [[ $(tmux show-option -qv -t "$s" @ct_agent 2>/dev/null) == opencode ]] || continue
+    [[ $(tmux show-option -qv -t "$s" @ct_port 2>/dev/null) == "$oc_port" ]] || continue
+    ws="$(tmux show-option -qv -t "$s" @ct_workspace 2>/dev/null)"
+    [[ -n $ws && -d $ws ]] || continue
+    tmux kill-session -t "=$s"
+    ( cd "$ws" && env -u CT_OPENCODE_REFRESH -u CT_WAKE_SINCE CT_AGENT=opencode CT_DETACH=1 "$ct_self" ) ||
+      echo "ct: could not reopen $s" >&2
+  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+  exit 0
+fi
 
 # One-time migration off the old trailing-dash names, so a session started by the
 # previous version of this script is adopted instead of orphaned. Only the exact
@@ -229,8 +301,7 @@ if tmux has-session -t "=$name" 2>/dev/null; then
   fi
   origin="$(tmux show-option -qv -t "$name" @ct_origin 2>/dev/null || true)"
   if [[ $agent == opencode ]]; then
-    port="$(tmux show-option -qv -t "$name" @ct_port 2>/dev/null || true)"
-    [[ -n $port ]] && opencode_access "$port"
+    opencode_access
   fi
   if [[ -n "${CT_DETACH:-}" ]]; then
     echo "ct: '$name' already running${origin:+ (started in $origin)} — detached, not attaching" >&2
@@ -293,36 +364,36 @@ wake_text() { # last-activity epoch, or "" if unknown -> the message on stdout, 
 # Quote arguments individually; the previous "claude ${*:-}" form word-split any
 # argument containing spaces.
 if [[ $agent == opencode ]]; then
-  port="$(opencode_port)"
-  # The TUI serves the same HTTP API as `opencode serve`, so one process is
-  # both the session you see in tmux and the server others attach to. Loopback
-  # only: the way in from outside is an authenticating proxy (code-server's
-  # /absproxy/, behind its sign-in), never an open port on the pod.
-  cmd="opencode --port $port --hostname 127.0.0.1"
-  # Resume by default, as for claude. opencode keeps its own session store and
-  # `--continue` picks the last session of this directory; with none it simply
-  # starts fresh. The caller's own session choice wins.
+  opencode_server
+  cmd="opencode attach $oc_url --dir $(printf '%q' "$workspace")"
+  # Resume by default, as for claude: this workspace's most recent session,
+  # chosen by id. With none, the terminal opens fresh. The caller's own session
+  # choice wins.
   resuming=0
   for a in "$@"; do
     case "$a" in -c|--continue|-s|--session|--session=*|--fork) resuming=1 ;; esac
   done
   if ((resuming == 0)) && [[ -z "${CT_FRESH:-}" ]]; then
-    cmd+=" --continue"
-    if wake="$(wake_text "")"; then
-      cmd+=" --prompt $(printf '%q' "$wake")"
+    sid="$(oc_last_session "$workspace")" || sid=""
+    if [[ -n $sid ]]; then
+      cmd+=" --session $sid"
+      echo "ct: resuming $sid (CT_FRESH=1 for a new session)" >&2
+      if wake="$(wake_text "")"; then
+        oc_wake "$workspace" "$sid" "$wake"
+      fi
     fi
   fi
   if (($#)); then
     cmd+=" $(printf '%q ' "$@")"
   fi
-  record_add "opencode $port"
+  record_add opencode
   tmux new-session -d -s "$name" -c "$workspace" \
     -e "CT_WORKSPACE=$agent_ws" -e "WORKSPACE_ROOT=$agent_root" "$cmd"
   tmux set-option -t "$name" @ct_workspace "$workspace" >/dev/null
   tmux set-option -t "$name" @ct_origin "$PWD" >/dev/null
   tmux set-option -t "$name" @ct_agent "$agent" >/dev/null
-  tmux set-option -t "$name" @ct_port "$port" >/dev/null
-  opencode_access "$port"
+  tmux set-option -t "$name" @ct_port "$oc_port" >/dev/null
+  opencode_access
   if [[ -n "${CT_DETACH:-}" ]]; then
     echo "ct: started '$name' detached (attach with: tmux attach -t '=$name')" >&2
     exit 0

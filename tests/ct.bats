@@ -8,7 +8,7 @@ setup() {
   export TMUX_STUB_LOG="$BATS_TEST_TMPDIR/tmux.log"
   export TMUX_STUB_SESSIONS="$BATS_TEST_TMPDIR/sessions"
   # Not the caller's ct settings: an agent started by ct-autostart has some set.
-  unset CT_AUTOSTART_GLOB CT_WORKSPACE_ROOT CT_FRESH CT_DETACH
+  unset CT_AUTOSTART_GLOB CT_WORKSPACE_ROOT CT_FRESH CT_DETACH CT_AGENT CT_WAKE CT_WAKE_SINCE CT_WAKE_FILE CT_OPENCODE_WEB CT_OPENCODE_SERVER_PORT CT_OPENCODE_SERVER_WAIT CURL_STUB_FAIL CURL_STUB_HEALTH_FAILS CURL_STUB_SESSIONS
   : > "$TMUX_STUB_LOG"; : > "$TMUX_STUB_SESSIONS"
   export HOME="$BATS_TEST_TMPDIR/home"
   mkdir -p "$HOME/dev/agent-alpha/repo-x" "$HOME/dev/agent-alpha-2" "$HOME/elsewhere"
@@ -172,42 +172,83 @@ record() { cat "$HOME/.local/share/ct/agents/$1"; }
   ! grep -q new-session "$TMUX_STUB_LOG"
 }
 
-@test "opencode: own session, loopback server, workspace root, --continue" {
+@test "opencode: a terminal attached to the shared server, at the workspace root" {
   ( cd "$HOME/dev/agent-alpha/repo-x" && CT_AGENT=opencode "$REPO/bin/ct" )
-  grep -qE -- "new-session -d -s opencode-agent-alpha -c $HOME/dev/agent-alpha .*opencode --port 41[0-9]{2} --hostname 127.0.0.1 --continue" "$TMUX_STUB_LOG"
+  grep -q -- "new-session -d -s opencode-agent-alpha -c $HOME/dev/agent-alpha .*opencode attach http://127.0.0.1:4096 --dir $HOME/dev/agent-alpha" "$TMUX_STUB_LOG"
   grep -q -- 'set-option -t opencode-agent-alpha @ct_agent opencode' "$TMUX_STUB_LOG"
-  grep -qE -- 'set-option -t opencode-agent-alpha @ct_port 41[0-9]{2}' "$TMUX_STUB_LOG"
+  grep -q -- 'set-option -t opencode-agent-alpha @ct_port 4096' "$TMUX_STUB_LOG"
   ! grep -q -- '--name' "$TMUX_STUB_LOG"
+  ! grep -q -- '--port' "$TMUX_STUB_LOG"
 }
 
-@test "opencode: the port is recorded and reused on the next launch" {
-  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" )
-  port="$(record agent-alpha | awk '$1=="opencode"{print $2}')"
-  [[ "$port" =~ ^41[0-9]{2}$ ]]
-  : > "$TMUX_STUB_SESSIONS"; : > "$TMUX_STUB_LOG"      # the session died
-  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" )
-  grep -q -- "--port $port " "$TMUX_STUB_LOG"
-  [ "$(record agent-alpha | grep -c opencode)" -eq 1 ]
-}
-
-@test "opencode: two workspaces never share a port, a full range is an error" {
-  export CT_OPENCODE_PORT_MIN=4100 CT_OPENCODE_PORT_MAX=4101
-  mkdir -p "$HOME/dev/agent-c"
+@test "opencode: a healthy server is used as it is, never started twice" {
   ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" )
   ( cd "$HOME/dev/agent-alpha-2" && CT_AGENT=opencode "$REPO/bin/ct" )
-  a="$(record agent-alpha | awk '{print $2}')"; b="$(record agent-alpha-2 | awk '{print $2}')"
-  [ "$a" != "$b" ]
-  run bash -c "cd '$HOME/dev/agent-c' && CT_AGENT=opencode '$REPO/bin/ct'"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"no free opencode port"* ]]
+  ! grep -q -- 'ct-opencode-server' "$TMUX_STUB_LOG"
+  grep -q -- "opencode attach http://127.0.0.1:4096 --dir $HOME/dev/agent-alpha-2" "$TMUX_STUB_LOG"
 }
 
-@test "opencode: CT_FRESH and the caller's own session flag drop --continue" {
+@test "opencode: no server answering starts one, in its own session, and waits for it" {
+  export CURL_STUB_HEALTH_FAILS=2 CURL_STUB_COUNT="$BATS_TEST_TMPDIR/health.count"
+  run bash -c "cd '$HOME/dev/agent-alpha' && CT_AGENT=opencode CT_OPENCODE_SERVER_PORT=4321 '$REPO/bin/ct'"
+  [ "$status" -eq 0 ]
+  grep -q -- "new-session -d -s ct-opencode-server -c $HOME .*opencode serve --port 4321 --hostname 127.0.0.1" "$TMUX_STUB_LOG"
+  grep -q -- 'opencode attach http://127.0.0.1:4321 ' "$TMUX_STUB_LOG"
+  [[ "$output" == *"started the opencode server on 127.0.0.1:4321"* ]]
+}
+
+@test "opencode: the server loop reopens its terminals after a restart" {
+  export CURL_STUB_HEALTH_FAILS=1 CURL_STUB_COUNT="$BATS_TEST_TMPDIR/health.count"
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" )
+  grep -q -- "new-session -d -s ct-opencode-server .*CT_OPENCODE_REFRESH=1 $REPO/bin/ct" "$TMUX_STUB_LOG"
+}
+
+@test "CT_OPENCODE_REFRESH reopens terminals on this server, and only those" {
+  echo "opencode-agent-alpha" > "$TMUX_STUB_SESSIONS"
+  export TMUX_STUB_AGENT=opencode TMUX_STUB_WS="$HOME/dev/agent-alpha" TMUX_STUB_PORT=4096
+  run bash -c "cd '$HOME' && CT_OPENCODE_REFRESH=1 '$REPO/bin/ct'"
+  [ "$status" -eq 0 ]
+  grep -q -- 'kill-session -t =opencode-agent-alpha' "$TMUX_STUB_LOG"
+  grep -q -- "new-session -d -s opencode-agent-alpha -c $HOME/dev/agent-alpha .*opencode attach http://127.0.0.1:4096 " "$TMUX_STUB_LOG"
+  # a pre-0.7.0 terminal is its own server on its own port: left alone
+  : > "$TMUX_STUB_LOG"; echo "opencode-agent-alpha" > "$TMUX_STUB_SESSIONS"
+  export TMUX_STUB_PORT=4150
+  run bash -c "cd '$HOME' && CT_OPENCODE_REFRESH=1 '$REPO/bin/ct'"
+  ! grep -q -- 'kill-session' "$TMUX_STUB_LOG"
+  ! grep -q -- 'new-session' "$TMUX_STUB_LOG"
+}
+
+@test "opencode: a server that never answers is an error, and nothing is attached" {
+  run bash -c "cd '$HOME/dev/agent-alpha' && CT_AGENT=opencode CURL_STUB_FAIL=1 CT_OPENCODE_SERVER_WAIT=1 '$REPO/bin/ct'"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"does not answer"* ]]
+  ! grep -q -- 'new-session -d -s opencode-agent-alpha' "$TMUX_STUB_LOG"
+}
+
+@test "opencode: resumes this workspace's most recent session, by id" {
+  export CURL_STUB_LOG="$BATS_TEST_TMPDIR/curl.log"
+  export CURL_STUB_SESSIONS='[{"id":"ses_new1","directory":"x"},{"id":"ses_old2","directory":"x"}]'
+  run bash -c "cd '$HOME/dev/agent-alpha/repo-x' && CT_AGENT=opencode '$REPO/bin/ct'"
+  [ "$status" -eq 0 ]
+  grep -q -- '--dir '"$HOME"'/dev/agent-alpha --session ses_new1' "$TMUX_STUB_LOG"
+  ! grep -q -- 'ses_old2' "$TMUX_STUB_LOG"
+  # asked for THIS workspace's sessions, not every workspace's
+  grep -q -- "http://127.0.0.1:4096/session?directory=$HOME/dev/agent-alpha$" "$CURL_STUB_LOG"
+  [[ "$output" == *"resuming ses_new1"* ]]
+}
+
+@test "opencode: no session yet opens a fresh terminal" {
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" )
+  ! grep -q -- '--session' "$TMUX_STUB_LOG"
+}
+
+@test "opencode: CT_FRESH and the caller's own session flag skip the pick" {
+  export CURL_STUB_SESSIONS='[{"id":"ses_new1"}]'
   ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode CT_FRESH=1 "$REPO/bin/ct" )
-  ! grep -q -- '--continue' "$TMUX_STUB_LOG"
+  ! grep -q -- 'ses_new1' "$TMUX_STUB_LOG"
   : > "$TMUX_STUB_SESSIONS"; : > "$TMUX_STUB_LOG"
   ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" -s ses_123 )
-  ! grep -q -- '--continue' "$TMUX_STUB_LOG"
+  ! grep -q -- 'ses_new1' "$TMUX_STUB_LOG"
   grep -q -- '-s ses_123' "$TMUX_STUB_LOG"
 }
 
@@ -220,13 +261,20 @@ record() { cat "$HOME/.local/share/ct/agents/$1"; }
   [[ "$output" != *"already running"* ]]
 }
 
-@test "reattaching an opencode session prints how to reach its server" {
+@test "reattaching an opencode session prints how to reach the server" {
   echo "opencode-agent-alpha" > "$TMUX_STUB_SESSIONS"
-  export TMUX_STUB_WS="$HOME/dev/agent-alpha" TMUX_STUB_PORT=4123
-  run bash -c "cd '$HOME/dev/agent-alpha' && CT_AGENT=opencode CT_OPENCODE_WEB='https://code.example/absproxy/{port}/' '$REPO/bin/ct'"
+  export TMUX_STUB_WS="$HOME/dev/agent-alpha"
+  run bash -c "cd '$HOME/dev/agent-alpha' && CT_AGENT=opencode CT_OPENCODE_WEB='https://opencode.example/' '$REPO/bin/ct'"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"opencode attach http://127.0.0.1:4123"* ]]
-  [[ "$output" == *"https://code.example/absproxy/4123/"* ]]
+  [[ "$output" == *"opencode attach http://127.0.0.1:4096 --dir $HOME/dev/agent-alpha"* ]]
+  [[ "$output" == *"opencode web: https://opencode.example/"* ]]
+}
+
+@test "opencode: CT_OPENCODE_WEB keeps its {port} placeholder working" {
+  echo "opencode-agent-alpha" > "$TMUX_STUB_SESSIONS"
+  export TMUX_STUB_WS="$HOME/dev/agent-alpha"
+  run bash -c "cd '$HOME/dev/agent-alpha' && CT_AGENT=opencode CT_OPENCODE_WEB='https://code-{port}.example/' '$REPO/bin/ct'"
+  [[ "$output" == *"https://code-4096.example/"* ]]
 }
 
 @test "record: a claude launch records claude" {
@@ -238,7 +286,15 @@ record() { cat "$HOME/.local/share/ct/agents/$1"; }
   mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200     # claude ran here before records
   ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" )
   record agent-alpha | grep -qx claude
-  record agent-alpha | grep -qE '^opencode [0-9]+$'
+  record agent-alpha | grep -qx opencode
+}
+
+@test "record: a pre-0.7.0 'opencode <port>' line is kept as it is, not doubled" {
+  mkdir -p "$HOME/.local/share/ct/agents"
+  printf 'opencode 4150\n' > "$HOME/.local/share/ct/agents/agent-alpha"
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode "$REPO/bin/ct" )
+  [ "$(record agent-alpha)" = "opencode 4150" ]
+  grep -q -- 'opencode attach http://127.0.0.1:4096 ' "$TMUX_STUB_LOG"
 }
 
 @test "record: opencode in a workspace claude never ran records opencode only" {
@@ -316,14 +372,35 @@ cmd_words() { # session-name -> sets the array W
   [[ "${W[-1]}" == "WOKE: this machine restarted at 20"*". Your last activity was "*" ago." ]]
 }
 
-@test "opencode gets the wake message as --prompt, not when fresh" {
+@test "opencode: the wake message goes into the resumed session through the API" {
+  export CURL_STUB_LOG="$BATS_TEST_TMPDIR/curl.log"
+  export CURL_STUB_SESSIONS='[{"id":"ses_new1"}]'
   ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode CT_WAKE_SINCE=$(date +%s) "$REPO/bin/ct" )
-  cmd_words opencode-agent-alpha
-  [ "${W[-2]}" = "--prompt" ]
-  [[ "${W[-1]}" == "ct: this machine restarted"* ]]
-  : > "$TMUX_STUB_LOG"; : > "$TMUX_STUB_SESSIONS"
-  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode CT_FRESH=1 CT_WAKE_SINCE=$(date +%s) "$REPO/bin/ct" )
+  # A POST with the body as its body: curl --get would turn the body into a
+  # query string and the server would never see the message (seen live, 0.7.0).
+  grep -q -- "-X POST .*--data-binary .*http://127.0.0.1:4096/session/ses_new1/prompt_async?directory=$HOME/dev/agent-alpha$" "$CURL_STUB_LOG"
+  ! grep -q -- '--get' "$CURL_STUB_LOG"
+  grep -q -- '"text":"ct: this machine restarted' "$CURL_STUB_LOG"
   ! grep -q -- '--prompt' "$TMUX_STUB_LOG"
+  : > "$TMUX_STUB_LOG"; : > "$TMUX_STUB_SESSIONS"; : > "$CURL_STUB_LOG"
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode CT_FRESH=1 CT_WAKE_SINCE=$(date +%s) "$REPO/bin/ct" )
+  ! grep -q -- 'prompt_async' "$CURL_STUB_LOG"
+}
+
+@test "opencode: a workspace path with a space is percent-encoded in the query" {
+  export CURL_STUB_LOG="$BATS_TEST_TMPDIR/curl.log"
+  mkdir -p "$HOME/dev/agent with space"
+  ( cd "$HOME/dev/agent with space" && CT_AGENT=opencode "$REPO/bin/ct" )
+  grep -q -- "http://127.0.0.1:4096/session?directory=$HOME/dev/agent%20with%20space$" "$CURL_STUB_LOG"
+}
+
+@test "opencode: the wake message survives quotes, backslashes and newlines as JSON" {
+  export CURL_STUB_LOG="$BATS_TEST_TMPDIR/curl.log"
+  export CURL_STUB_SESSIONS='[{"id":"ses_new1"}]'
+  mkdir -p "$HOME/.config/ct"
+  printf 'say "hi" \\ then\nnext line' > "$HOME/.config/ct/wake.md"
+  ( cd "$HOME/dev/agent-alpha" && CT_AGENT=opencode CT_WAKE_SINCE=$(date +%s) "$REPO/bin/ct" )
+  grep -qF -- '"text":"say \"hi\" \\ then\nnext line"' "$CURL_STUB_LOG"
 }
 
 @test "pinned: resumes that id under its name, from its dir, and records it" {

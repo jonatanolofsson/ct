@@ -14,7 +14,7 @@ setup() {
   export CT_AUTOSTART_STAGGER=0
   # The suite must not inherit the caller's ct settings: an agent started BY
   # ct-autostart runs with CT_AUTOSTART_GLOB set, and the defaults are under test.
-  unset CT_AUTOSTART_GLOB CT_AUTOSTART_FORCE CT_AUTOSTART_INTERVAL CT_AUTOSTART_RETRY CT_AUTOSTART_DIALOG_RE CT_WORKSPACE_ROOT CT_FRESH CT_DETACH
+  unset CT_AUTOSTART_GLOB CT_AUTOSTART_FORCE CT_AUTOSTART_INTERVAL CT_AUTOSTART_RETRY CT_AUTOSTART_DIALOG_RE CT_WORKSPACE_ROOT CT_FRESH CT_DETACH CT_AGENT CT_WAKE CT_WAKE_SINCE CT_WAKE_FILE CT_OPENCODE_WEB CT_OPENCODE_SERVER_PORT CURL_STUB_FAIL CURL_STUB_HEALTH_FAILS CURL_STUB_SESSIONS
   # transcript dir names are the cwd with / -> -  (they START with a hyphen)
   mktranscript() {
     local ws="$1"; local key; key="$HOME/.claude/projects/$(printf '%s' "$ws" | tr -c 'A-Za-z0-9' '-')"
@@ -260,14 +260,24 @@ mkrecord() { mkdir -p "$HOME/.local/share/ct/agents"; printf '%b' "$2" > "$HOME/
   [[ "$output" == *"agent-one: started"* ]]
 }
 
-@test "starts every recorded agent, opencode on its recorded port" {
+@test "starts every recorded agent, opencode attached to the shared server" {
   touch "$HOME/.ct-autostart"
   mkrecord agent-one 'claude\nopencode 4150\n'
   run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
   [ "$status" -eq 0 ]
   grep -q -- 'new-session -d -s claude-agent-one ' "$TMUX_STUB_LOG"
-  grep -q -- 'new-session -d -s opencode-agent-one .*opencode --port 4150 --hostname 127.0.0.1 --continue' "$TMUX_STUB_LOG"
+  grep -q -- "new-session -d -s opencode-agent-one .*opencode attach http://127.0.0.1:4096 --dir $HOME/dev/agent-one" "$TMUX_STUB_LOG"
   [[ "$output" == *"agent-one [opencode]: started"* ]]
+}
+
+@test "a plain 'opencode' record (ct 0.7.0) starts it and probes the shared server" {
+  touch "$HOME/.ct-autostart"
+  mkrecord agent-one 'opencode\n'; mkrecord agent-two ''
+  echo "opencode-agent-one" > "$TMUX_STUB_SESSIONS"
+  export CURL_STUB_LOG="$BATS_TEST_TMPDIR/curl.log"
+  run env CT_AUTOSTART_NO_WARMUP=1 CT_OPENCODE_SERVER_PORT=4321 "$REPO/bin/ct-autostart"
+  [[ "$output" == *"agent-one [opencode]: already running"* ]]
+  grep -q -- 'http://127.0.0.1:4321/global/health' "$CURL_STUB_LOG"
 }
 
 @test "an empty record starts nothing for that workspace" {
@@ -295,7 +305,7 @@ mkrecord() { mkdir -p "$HOME/.local/share/ct/agents"; printf '%b' "$2" > "$HOME/
   export CURL_STUB_LOG="$BATS_TEST_TMPDIR/curl.log"
   run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
   [[ "$output" == *"agent-one [opencode]: already running"* ]]
-  grep -q -- 'http://127.0.0.1:4150/global/health' "$CURL_STUB_LOG"
+  grep -q -- 'http://127.0.0.1:4096/global/health' "$CURL_STUB_LOG"
   ! grep -q -- 'new-session' "$TMUX_STUB_LOG"
 }
 
@@ -304,7 +314,7 @@ mkrecord() { mkdir -p "$HOME/.local/share/ct/agents"; printf '%b' "$2" > "$HOME/
   mkrecord agent-one 'opencode 4150\n'; mkrecord agent-two ''
   echo "opencode-agent-one" > "$TMUX_STUB_SESSIONS"
   run env CT_AUTOSTART_NO_WARMUP=1 CURL_STUB_FAIL=1 "$REPO/bin/ct-autostart"
-  [[ "$output" == *"agent-one [opencode]: WARNING — running, but its server on port 4150 does not answer"* ]]
+  [[ "$output" == *"agent-one [opencode]: WARNING — running, but its server on port 4096 does not answer"* ]]
   ! grep -q -- 'kill-session' "$TMUX_STUB_LOG"
 }
 

@@ -104,7 +104,8 @@ to check and do. Claude gets it as its initial prompt, OpenCode as `--prompt`.
 - Every resumed agent runs one turn at boot, staggered by `CT_AUTOSTART_STAGGER`.
 
 **Which agents** a workspace runs is ct's record, `~/.local/share/ct/agents/<workspace>`. ct writes it
-whenever it launches an agent, with one line per agent: `claude`, or `opencode <port>`.
+whenever it launches an agent, with one line per agent: `claude` or `opencode` (a pre-0.7.0
+`opencode <port>` line still reads as `opencode`).
 - **No record** means `claude`, exactly as before agents existed. An existing pod therefore upgrades with
   no change.
 - **An empty record** means no agents.
@@ -128,8 +129,8 @@ process check; this is the only place it shows. The summary line counts them
 session in a directory `~/.claude.json` does not trust yet is flagged at start,
 since it will stop at the trust dialog.
 
-An OpenCode session is checked over HTTP instead of by its screen:
-`GET http://127.0.0.1:<port>/global/health` must answer `"healthy":true`. That is sturdier than reading
+An OpenCode session is checked over HTTP instead of by its screen: the shared server's
+`GET http://127.0.0.1:<CT_OPENCODE_SERVER_PORT>/global/health` must answer `"healthy":true`. That is sturdier than reading
 a TUI. A server that doesn't answer is a `WARNING` too, and the session is not killed. A session whose
 process has died is gone from tmux, and the next pass (`--loop`) starts it again, as for Claude.
 
@@ -147,7 +148,7 @@ already installed once will silently miss transitive dependencies.
 |---|---|
 | `claude` CLI installed + credentials present | `ct-autostart` refuses to start agents that would die on missing login |
 | `opencode` installed, its provider keys in the environment (only for OpenCode agents) | OpenCode sessions start from `ct-autostart` with no person present to log in |
-| `curl` (only for OpenCode agents) | the health probe; without it, running OpenCode sessions are not checked |
+| `curl` (only for OpenCode agents) | ct reaches the OpenCode server with it (health, the workspace's last session, the wake message); OpenCode agents do not start without it |
 | tmux installable (apt, cached .debs, or nix) | sessions live in tmux |
 | Persistent `$HOME` | transcripts, workspaces and installed copies must survive restarts |
 

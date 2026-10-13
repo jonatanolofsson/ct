@@ -144,8 +144,9 @@ pins="$state/sessions"
 # letter or a digit becomes '-'. Same rule as ct's transcripts(); see there.
 transcripts() { printf '%s/.claude/projects/%s' "$HOME" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-')"; }
 
-# A workspace's agents, one line each: "claude", or "opencode <port>". No record
-# means claude — see the header. An empty record means none.
+# A workspace's agents, one line each: "claude" or "opencode" (a pre-0.7.0
+# "opencode <port>" line reads as "opencode"). No record means claude — see the
+# header. An empty record means none.
 agents_of() { # workspace dir
   local f
   f="$records/$(ws_key "$1")"
@@ -175,6 +176,9 @@ units() {
     mapfile -t lines < <(agents_of "$ws")
     for line in "${lines[@]}"; do
       read -r a port <<<"$line"
+      # Every opencode agent is a terminal on the one shared server (ct 0.7.0):
+      # its health is that server's.
+      [[ $a == opencode ]] && port="${CT_OPENCODE_SERVER_PORT:-4096}"
       unit "$a" "$port" "$a-$key" "$(label "${ws##*/}" "$a")" "${ws##*/}" "$ws" ""
     done
   done
@@ -253,8 +257,9 @@ untrusted() { # workspace dir -> true when ~/.claude.json does not trust it
   [[ $(jq -r --arg p "$1" '.projects[$p].hasTrustDialogAccepted // false' "$HOME/.claude.json" 2>/dev/null) != true ]]
 }
 
-# opencode's health is not on its screen: it serves an HTTP API on the port ct
-# recorded, and asking that is a sturdier check than reading a TUI. Like the
+# opencode's health is not on its screen: its terminal is attached to the one
+# opencode server ct runs, and asking that server is a sturdier check than
+# reading a TUI. Like the
 # screen check this only WARNS — a session that is up but not answering may be
 # mid-way through something a person would not want killed.
 http_problem() { # port -> prints the problem, returns 1 if there is none
@@ -323,7 +328,7 @@ run_round() {
     # transcript (created, never prompted) gets a fresh session. Skipping it,
     # as before, made a new agent vanish at its first pod restart. Bash globs
     # only: the transcript dirs start with a hyphen. opencode resumes from its
-    # own store (ct passes --continue).
+    # server's store (ct picks the workspace's last session by id).
     note=""
     if [[ $a == claude && -z $sid ]] && ! glob_any "$(transcripts "$dir")" '*.jsonl'; then
       note=" (no transcript yet — fresh session)"

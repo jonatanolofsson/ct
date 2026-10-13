@@ -11,7 +11,7 @@ agents in parallel against shared remotes.
 
     cd ~/dev/<workspace>            # or anywhere inside it
     ct                              # Claude Code: start, or reattach if running
-    CT_AGENT=opencode ct            # OpenCode, in its own session beside Claude
+    CT_AGENT=opencode ct            # OpenCode, in its own session beside Claude, on the shared server
     CT_DETACH=1 ct                  # start without attaching (scripts, boot)
     CT_FRESH=1 ct                   # a new conversation instead of resuming
 
@@ -23,8 +23,9 @@ Settings are environment variables, never flags. Every argument is forwarded to 
 | `CT_DETACH` | start the session and return instead of attaching |
 | `CT_FRESH` | don't resume the workspace's last conversation |
 | `CT_AGENT_FORGET` | with `CT_AGENT`: stop `ct-autostart` from starting that agent in this workspace |
-| `CT_OPENCODE_WEB` | URL template printed for an OpenCode session's web UI; `{port}` is replaced |
-| `CT_OPENCODE_PORT_MIN` / `_MAX` | port range for OpenCode servers (default 4100–4199) |
+| `CT_OPENCODE_SERVER_PORT` | loopback port of the one OpenCode server (default 4096) |
+| `CT_OPENCODE_SERVER_WAIT` | seconds to wait for that server to answer (default 60) |
+| `CT_OPENCODE_WEB` | URL printed for the OpenCode web UI; `{port}` is replaced by the server's port |
 | `CT_WORKSPACE_ROOT` | a single workspace root instead of `~/dev` and `~/workspaces` |
 
 ct also *exports* two variables into every agent it starts, so the workspace conventions' "Add a repo"
@@ -33,18 +34,30 @@ recipe runs as written: `CT_WORKSPACE` (the agent's workspace) and `WORKSPACE_RO
 | `CT_SESSION_ID` + `CT_NAME` | pin one claude conversation by id, run from its own directory (see below) |
 | `CT_WAKE` | `0`: ct-autostart wakes nobody with a message (see below) |
 
-### OpenCode sessions are also servers
+### One OpenCode server, one terminal per workspace
 
-An OpenCode session serves its HTTP API on a loopback port. The port is chosen once per workspace and
-kept, so it is the same after every restart. ct prints it on launch and on reattach. Join the live
-session from a second terminal:
+ct runs ONE OpenCode server per machine, `opencode serve` on a loopback port (`CT_OPENCODE_SERVER_PORT`,
+default 4096), in its own tmux session `ct-opencode-server`. It starts the server on first use, restarts
+it if it exits, and waits for it to answer. Each workspace's OpenCode session is a terminal attached to
+that server for its own directory:
 
-    opencode attach http://127.0.0.1:<port>
+    opencode attach http://127.0.0.1:4096 --dir <workspace> --session <id>
 
-or from a browser through an authenticating proxy that runs in the same pod. With code-server, that's
-`https://<code-server-host>/absproxy/<port>/`, which a site can print by setting
-`CT_OPENCODE_WEB='https://<host>/absproxy/{port}/'`. The server binds to loopback only, so it is never
-reachable from the network directly.
+ct resumes the workspace's most recent session by id, asking the server for that directory's sessions.
+(`--continue` would pick the most recent session of any workspace.) A resumed agent's wake message
+goes into its session through the server's API, before the terminal attaches.
+
+One server means one address for every workspace: its web UI lists them all. A site points a browser at
+it through an authenticating proxy that runs in the same machine, and prints that address by setting
+`CT_OPENCODE_WEB`. The server binds to loopback only, so it is never reachable from the network directly.
+
+Two consequences:
+- A server restart drops every attached terminal at once. ct-autostart's next pass brings them back.
+- The agents' shells run in their workspace directory but do not carry `CT_WORKSPACE`; the conventions'
+  recipe falls back to the current directory, which is the same thing.
+
+Before 0.7.0 each workspace's terminal was its own server, on its own port (4100–4199). A session started
+that way keeps running until it exits; the next start uses the shared server.
 
 OpenCode reads `AGENTS.md` and falls back to `CLAUDE.md`, searching upward from where it starts (the
 workspace root). The workspace-root `CLAUDE.md` that ct maintains therefore reaches it too. Unlike Claude,
