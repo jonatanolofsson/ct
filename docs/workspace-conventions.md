@@ -72,6 +72,19 @@ outside every session dir, so session teardown never touches it.
 - Cut a clone loose from its cache (before archiving/moving it off this box):
   `git -C <clone> repack -a -d && rm <clone>/.git/objects/info/alternates`  (or clone with `--dissociate`).
 
+## Your plan and scratch are yours — in your workspace, never shared
+Every agent is independent, so its working files live in its OWN workspace, never in a directory that several
+sessions share:
+
+- **Plans** are written to `<workspace>/.claude/plans/`. `plansDirectory` in `~/.claude/settings.json` sets this
+  (`.claude/plans`, resolved against the project root, which is the workspace, because ct starts the agent there).
+  Before it, every session wrote plans into the one shared `~/.claude/plans/`. Two agents then took the same file
+  for different work, each rewriting the other's, and the first plan's text was lost.
+- **Edit only your own plan.** To change what another agent planned, message it. Never edit its file, not even to
+  add a section about your own work.
+- Delete your own working files when you are finished with them. A file someone else deletes mid-use, or a
+  directory a reboot wipes (`/tmp`), is lost work, not cleanup.
+
 ## Sessions share remotes — sync, don't clobber
 Clones are isolated; **the remotes are not**. Another session is very likely pushing to the same `main` while
 you work. Therefore, in every clone you touch:

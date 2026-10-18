@@ -1,5 +1,6 @@
 {
   "//": "Starting-point permissions for Claude Code in a ct workspace. The split is read-vs-mutate: reads are allowed, mutations ask. Every rule is doubled for `direnv exec .` because nix-flake repos run tools through direnv. Copy to ~/.claude/settings.json and add your own path grants (Edit/Write/Read roots, permissions.additionalDirectories) — deliberately not included here.",
+  "plansDirectory": ".claude/plans",
   "permissions": {
     "allow": [
       "WebFetch",

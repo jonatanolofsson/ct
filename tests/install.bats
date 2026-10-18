@@ -53,3 +53,34 @@ order() { grep -oE 'BEGIN ct(-site)?-managed' "$MD" | tr '\n' ' '; }
   [ -n "$ref" ]
   [[ "$commit" =~ ^[0-9a-f]{7,}(-dirty)?$ ]]
 }
+
+# Plans live in the workspace, never the shared ~/.claude/plans/ (two agents
+# rewrote each other's plan file there, 2026-10-17/18).
+@test "a fresh install seeds plansDirectory" {
+  "$REPO/install.sh" 2>/dev/null
+  grep -q '"plansDirectory": ".claude/plans"' "$HOME/.claude/settings.json"
+}
+
+@test "an existing settings.json gains plansDirectory, keeps its keys and mode" {
+  mkdir -p "$HOME/.claude"
+  printf '{"model": "x", "permissions": {"allow": ["Read"]}}\n' > "$HOME/.claude/settings.json"
+  chmod 600 "$HOME/.claude/settings.json"
+  "$REPO/install.sh" 2>/dev/null
+  perl -MJSON::PP -e 'local $/; open F, shift; my $d = decode_json(<F>);
+    exit !($d->{plansDirectory} eq ".claude/plans" && $d->{model} eq "x" && $d->{permissions}{allow}[0] eq "Read")' \
+    "$HOME/.claude/settings.json"
+  [ "$(stat -c %a "$HOME/.claude/settings.json")" = "600" ]
+}
+
+@test "a plansDirectory someone chose is left alone, and the file is not rewritten" {
+  mkdir -p "$HOME/.claude"
+  printf '{"plansDirectory": "docs/plans"}\n' > "$HOME/.claude/settings.json"
+  h1=$(sha256sum < "$HOME/.claude/settings.json")
+  "$REPO/install.sh" 2>/dev/null
+  [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
+}
+
+@test "the conventions block tells agents where plans live" {
+  "$REPO/install.sh" 2>/dev/null
+  grep -q '<workspace>/.claude/plans/' "$CT_HOME/CLAUDE.md"
+}

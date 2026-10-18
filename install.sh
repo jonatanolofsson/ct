@@ -87,6 +87,30 @@ if [ ! -f "$HOME/.claude/settings.json" ]; then
     say "seeded ~/.claude/settings.json from template"
 fi
 
+# --- 3b. plans live in the workspace (added to an existing file if absent) --
+# The seed above is write-once, so a machine set up before plansDirectory
+# existed would keep writing every session's plans into the one shared
+# ~/.claude/plans/, where two agents took the same file for different work
+# (docs/workspace-conventions.md, "Your plan and scratch are yours"). Add the key
+# only when it is absent: a value someone chose is left alone, and the file is
+# rewritten only when the key is actually added. perl + JSON::PP because they
+# are core on every base image this runs on at boot; jq, python3 and node are
+# not.
+settings="$HOME/.claude/settings.json"
+perl -MJSON::PP -e '
+    my $f = shift;
+    local $/; open(my $in, "<", $f) or exit 0; my $raw = <$in>; close $in;
+    my $d = eval { JSON::PP->new->relaxed->decode($raw) };
+    if (!defined $d || ref $d ne "HASH") { print STDERR "ct-install: $f is not a JSON object; plansDirectory not added\n"; exit 0 }
+    exit 0 if exists $d->{plansDirectory};
+    $d->{plansDirectory} = ".claude/plans";
+    my $mode = (stat $f)[2] & 07777;
+    open(my $out, ">", "$f.ct-tmp") or die "write $f.ct-tmp: $!\n";
+    print $out JSON::PP->new->pretty->canonical->encode($d); close $out;
+    chmod $mode, "$f.ct-tmp"; rename "$f.ct-tmp", $f or die "rename: $!\n";
+    print STDERR "ct-install: added plansDirectory=.claude/plans to $f\n";
+' "$settings"
+
 # --- 4. version stamp -------------------------------------------------------
 mkdir -p "$HOME/.local/share/ct"
 # Record the resolved commit next to the ref: a checkout run on `main` would
