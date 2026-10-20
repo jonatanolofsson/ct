@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
 # sudo stub: never escalate in tests; pretend package operations succeed.
 echo "sudo $*" >> "${SUDO_STUB_LOG:-/dev/null}"
+# SUDO_STUB_EXEC=1: run the command as the test user (the ensure-nix tests
+# point it at temp dirs, so it needs no privilege).
+[ -n "${SUDO_STUB_EXEC:-}" ] && exec "$@"
 exit 0
