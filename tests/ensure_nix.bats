@@ -84,3 +84,31 @@ installed_etc() {   # /etc as the installer leaves it
   [ "$status" -eq 1 ]
   [[ "$output" == *"nix still missing"* ]]
 }
+
+@test "a world-writable /nix is made 0755 before installing (nix refuses it otherwise)" {
+  rm "$ENSURE_NIX_ROOT/var/nix/profiles/default/bin/nix"
+  chmod 2777 "$ENSURE_NIX_ROOT"
+  run env CURL_STUB_FAIL=1 "$REPO/bin/ensure-nix"
+  [ "$status" -eq 1 ]                                   # no download in the test
+  [[ "$(stat -c %a "$ENSURE_NIX_ROOT")" == *755 ]]      # but fixed before trying (setgid may stay)
+}
+
+@test "a half-finished install (receipt, no nix) is cleared so the next install can run" {
+  rm "$ENSURE_NIX_ROOT/var/nix/profiles/default/bin/nix"
+  echo '{}' > "$ENSURE_NIX_ROOT/receipt.json"
+  mkdir -p "$ENSURE_NIX_ROOT/store/abc-partial" "$ENSURE_NIX_ROOT/temp-install-dir"
+  run env CURL_STUB_FAIL=1 "$REPO/bin/ensure-nix"
+  [[ "$output" == *"half-finished install"* ]]
+  [ ! -e "$ENSURE_NIX_ROOT/receipt.json" ]
+  [ ! -e "$ENSURE_NIX_ROOT/store" ]
+  [ -d "$ENSURE_NIX_ROOT" ]                             # the mount point itself stays
+}
+
+@test "a working install with a receipt is left alone" {
+  echo '{}' > "$ENSURE_NIX_ROOT/receipt.json"
+  installed_etc
+  run "$REPO/bin/ensure-nix"
+  [ "$status" -eq 0 ]
+  [ -e "$ENSURE_NIX_ROOT/receipt.json" ]
+  [[ "$output" != *"half-finished"* ]]
+}

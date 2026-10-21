@@ -45,6 +45,17 @@ keep_etc() {
 }
 
 fresh=""
+# Nix refuses a world-writable /nix ("Path /nix is world-writable ... not
+# allowed for security") — and a mount point kubelet creates on the home PVC
+# inherits the home root's 2777. So before anything else, not after the install.
+[[ -d "$NIX_ROOT" ]] && sudo chmod 0755 "$NIX_ROOT"
+# An install that failed half-way leaves a receipt the installer treats as
+# "already completed", so every later boot refuses to retry and nix never comes
+# back. Clear that wreck so the install below starts clean.
+if [[ ! -x "$PROFILE/bin/nix" && -e "$NIX_ROOT/receipt.json" ]]; then
+  log "half-finished install in $NIX_ROOT (receipt, no nix) — clearing it"
+  sudo find "$NIX_ROOT" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+fi
 if [[ -x "$PROFILE/bin/nix" ]]; then
   restore_etc
 else
@@ -59,9 +70,6 @@ else
 fi
 [[ -x "$PROFILE/bin/nix" ]] || { log "nix still missing, giving up"; exit 1; }
 keep_etc "$fresh"
-# A mount point kubelet created for /nix can come up 0750; the coder user must
-# be able to traverse it to reach its profile and the store.
-sudo chmod 0755 "$NIX_ROOT"
 
 # No systemd, so the daemon is ours to start. Same call .bashrc makes for
 # interactive shells; done here too because a tmux pane running claude
