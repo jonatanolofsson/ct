@@ -56,10 +56,12 @@ fi
 # Session identity = the workspace directory. Under no root there is no workspace
 # to name it after, so fall back to the current directory.
 workspace="$PWD"
+in_root=0
 for root in "${ws_roots[@]}"; do
   if [[ "$PWD" == "$root"/* ]]; then
     rel="${PWD#"$root"/}"
     workspace="$root/${rel%%/*}"
+    in_root=1
     break
   fi
 done
@@ -71,6 +73,53 @@ done
 # conversation in a worktree still belongs to the workspace that holds it.
 agent_ws="$workspace"
 agent_root="${agent_ws%/*}"
+
+# --- the workspace's own environment ---
+#
+# Logins belong to a workspace, never to the machine (docs/workspace-conventions.md,
+# "Logins are the workspace's"): two workspaces may work as two different Google
+# accounts, and a login in ~/.config is every agent's at once. So a workspace
+# under a root gets an .envrc at its first launch — written once, never
+# overwritten, so the workspace can add its own — and the agent starts through
+# `direnv exec` on it, which gives everything it runs, MCP servers included,
+# that environment. A clone's .envrc inherits it with `source_up_if_exists`.
+ws_envrc_write() {
+  local f="$agent_ws/.envrc"
+  ((in_root)) || return 0
+  [[ -e $f ]] && return 0
+  cat > "$f" <<'EOF'
+# This workspace's own environment. ct wrote it at the first launch and never
+# overwrites it, so edit it freely (and run `direnv allow` here afterwards). ct
+# starts the agent through `direnv exec` on this file, and a clone's .envrc that
+# begins with `source_up_if_exists` inherits it.
+#
+# Logins belong to the workspace, never to the machine: one workspace, one set
+# of identities, and deleting the workspace deletes its logins with it.
+export CLOUDSDK_CONFIG="$PWD/.config/gcloud"   # gcloud, and its application-default credentials
+
+# Tools for the agent outside any clone, if this workspace has a flake of its own.
+if [[ -f flake.nix ]]; then use flake; fi
+
+source_env_if_exists .envrc.local
+EOF
+  echo "ct: wrote $f — this workspace's logins live in the workspace" >&2
+  if command -v direnv >/dev/null 2>&1; then direnv allow "$agent_ws" >/dev/null 2>&1 || true; fi
+}
+
+# The prefix that starts a command inside the workspace's environment, or
+# nothing. A blocked .envrc makes `direnv exec` refuse to run the command at all,
+# which would take the agent down with it, so probe first and start without the
+# environment — loudly — rather than not at all.
+ws_exec_prefix() {
+  ((in_root)) || return 0
+  [[ -f "$agent_ws/.envrc" ]] || return 0
+  command -v direnv >/dev/null 2>&1 || { echo "ct: no direnv — starting without $agent_ws/.envrc" >&2; return 0; }
+  if direnv exec "$agent_ws" true >/dev/null 2>&1; then
+    printf "direnv exec %q " "$agent_ws"
+  else
+    echo "ct: WARNING: $agent_ws/.envrc is blocked (run: direnv allow $agent_ws) — starting WITHOUT the workspace's environment, so its logins fall back to the machine's" >&2
+  fi
+}
 
 # --- pinned sessions: one conversation, kept alive by id, outside any workspace ---
 #
@@ -488,6 +537,8 @@ if [[ -n $pinned ]]; then
 else
   record_add claude
 fi
+ws_envrc_write
+cmd="$(ws_exec_prefix)$cmd"
 tmux new-session -d -s "$name" -c "$workspace" \
   -e "CT_WORKSPACE=$agent_ws" -e "WORKSPACE_ROOT=$agent_root" "$cmd"
 tmux set-option -t "$name" @ct_workspace "$workspace" >/dev/null

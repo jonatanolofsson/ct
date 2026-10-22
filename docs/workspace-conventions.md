@@ -85,6 +85,25 @@ sessions share:
 - Delete your own working files when you are finished with them. A file someone else deletes mid-use, or a
   directory a reboot wipes (`/tmp`), is lost work, not cleanup.
 
+## Logins are the workspace's — never the machine's
+No login is machine-global. Two workspaces may work as two different accounts, and a login under `~/.config` is
+every agent's at once: one agent's `gcloud auth application-default login` silently changes whose identity every
+other agent's tooling uses. So ct writes `<workspace>/.envrc` at a workspace's first launch, and starts the agent
+through `direnv exec` on it. The file keeps gcloud's whole state, accounts and application-default credentials
+alike, in `<workspace>/.config/gcloud` (`CLOUDSDK_CONFIG`). Deleting the workspace deletes its logins.
+
+- **Every repo's `.envrc` begins with `source_up_if_exists`.** `direnv exec <clone>` swaps out the environment
+  direnv loaded before it, so a clone without that line drops the workspace's settings. gcloud then falls back to
+  the machine's `~/.config/gcloud`, and nothing tells you.
+- **Sign in from inside the workspace**, with `CLOUDSDK_CONFIG` pointing into it: `gcloud auth login`, then
+  `gcloud auth application-default login`. If `echo $CLOUDSDK_CONFIG` is empty, stop. Never sign in without it.
+- **Any other tool that signs in works the same way**: its config-directory variable goes in the workspace
+  `.envrc`, pointing inside the workspace.
+- **After editing the workspace `.envrc`**, run `direnv allow <workspace>` and restart the agent. Its environment
+  is set when it starts. A blocked `.envrc` makes ct start the agent *without* it, with a warning.
+- **OpenCode** runs every workspace's tools in its one shared server, so they don't get the workspace's
+  environment. A command run as `direnv exec <clone> …` still does.
+
 ## Sessions share remotes — sync, don't clobber
 Clones are isolated; **the remotes are not**. Another session is very likely pushing to the same `main` while
 you work. Therefore, in every clone you touch:

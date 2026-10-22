@@ -34,6 +34,14 @@ recipe runs as written: `CT_WORKSPACE` (the agent's workspace) and `WORKSPACE_RO
 | `CT_SESSION_ID` + `CT_NAME` | pin one claude conversation by id, run from its own directory (see below) |
 | `CT_WAKE` | `0`: ct-autostart wakes nobody with a message (see below) |
 
+### The workspace's environment: logins live in the workspace
+
+At a workspace's first launch ct writes `<workspace>/.envrc` (never overwriting one that exists) and starts
+the agent through `direnv exec` on it. The file sets `CLOUDSDK_CONFIG` inside the workspace, so gcloud logins
+and application-default credentials belong to that workspace, not the machine. Each repo's `.envrc` inherits it
+with `source_up_if_exists`. A blocked `.envrc` makes ct warn and start the agent without it, rather than not at
+all. See the conventions, "Logins are the workspace's".
+
 ### One OpenCode server, one terminal per workspace
 
 ct runs ONE OpenCode server per machine, `opencode serve` on a loopback port (`CT_OPENCODE_SERVER_PORT`,

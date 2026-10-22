@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# direnv stub: records argv; `exec DIR cmd` runs cmd unless the .envrc is blocked.
+# State (env):
+#   DIRENV_STUB_LOG      file to append argv lines to (default: none)
+#   DIRENV_STUB_BLOCKED  set: `exec` fails as a blocked .envrc does, without
+#                        running the command
+echo "direnv $*" >> "${DIRENV_STUB_LOG:-/dev/null}"
+case "$1" in
+  allow) exit 0 ;;
+  exec)
+    if [[ -n "${DIRENV_STUB_BLOCKED:-}" ]]; then
+      echo "direnv: error $2/.envrc is blocked. Run \`direnv allow\` to approve its content" >&2
+      exit 1
+    fi
+    shift 2; exec "$@" ;;
+esac
+exit 0

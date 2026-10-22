@@ -8,7 +8,8 @@ setup() {
   export TMUX_STUB_LOG="$BATS_TEST_TMPDIR/tmux.log"
   export TMUX_STUB_SESSIONS="$BATS_TEST_TMPDIR/sessions"
   # Not the caller's ct settings: an agent started by ct-autostart has some set.
-  unset CT_AUTOSTART_GLOB CT_WORKSPACE_ROOT CT_FRESH CT_DETACH CT_AGENT CT_WAKE CT_WAKE_SINCE CT_WAKE_FILE CT_OPENCODE_WEB CT_OPENCODE_SERVER_PORT CT_OPENCODE_SERVER_WAIT CURL_STUB_FAIL CURL_STUB_HEALTH_FAILS CURL_STUB_SESSIONS
+  unset CT_AUTOSTART_GLOB CT_WORKSPACE_ROOT CT_FRESH CT_DETACH CT_AGENT CT_WAKE CT_WAKE_SINCE CT_WAKE_FILE CT_OPENCODE_WEB CT_OPENCODE_SERVER_PORT CT_OPENCODE_SERVER_WAIT CURL_STUB_FAIL CURL_STUB_HEALTH_FAILS CURL_STUB_SESSIONS DIRENV_STUB_BLOCKED
+  export DIRENV_STUB_LOG="$BATS_TEST_TMPDIR/direnv.log"
   : > "$TMUX_STUB_LOG"; : > "$TMUX_STUB_SESSIONS"
   export HOME="$BATS_TEST_TMPDIR/home"
   mkdir -p "$HOME/dev/agent-alpha/repo-x" "$HOME/dev/agent-alpha-2" "$HOME/elsewhere"
@@ -450,4 +451,37 @@ cmd_words() { # session-name -> sets the array W
   mkts "$dir" "fork-1234" 10
   ( cd "$dir" && CT_SESSION_ID=fork-1234 CT_NAME=alpha-fork "$REPO/bin/ct" )
   grep -q -- "-c $dir -e CT_WORKSPACE=$HOME/dev/agent-alpha -e WORKSPACE_ROOT=$HOME/dev " "$TMUX_STUB_LOG"
+}
+
+@test "first launch under a root writes the workspace's .envrc, with gcloud kept in the workspace" {
+  ( cd "$HOME/dev/agent-alpha/repo-x" && "$REPO/bin/ct" )
+  grep -q 'export CLOUDSDK_CONFIG="$PWD/.config/gcloud"' "$HOME/dev/agent-alpha/.envrc"
+  grep -q "direnv allow $HOME/dev/agent-alpha" "$DIRENV_STUB_LOG"
+  [[ ! -e "$HOME/dev/agent-alpha/repo-x/.envrc" ]]
+}
+
+@test "an existing workspace .envrc is never overwritten" {
+  echo 'export MINE=1' > "$HOME/dev/agent-alpha/.envrc"
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  [[ "$(cat "$HOME/dev/agent-alpha/.envrc")" == 'export MINE=1' ]]
+}
+
+@test "outside all roots no .envrc is written and claude starts directly" {
+  ( cd "$HOME/elsewhere" && "$REPO/bin/ct" )
+  [[ ! -e "$HOME/elsewhere/.envrc" ]]
+  ! grep -q 'direnv exec' "$TMUX_STUB_LOG"
+}
+
+@test "the agent starts inside the workspace's environment" {
+  ( cd "$HOME/dev/agent-alpha/repo-x" && "$REPO/bin/ct" )
+  grep -q -- "-c $HOME/dev/agent-alpha .*direnv exec $HOME/dev/agent-alpha claude " "$TMUX_STUB_LOG"
+}
+
+@test "a blocked workspace .envrc warns and starts the agent without it rather than not at all" {
+  export DIRENV_STUB_BLOCKED=1
+  run run_ct "$HOME/dev/agent-alpha"
+  [[ $status -eq 0 ]]
+  [[ $output == *"is blocked"*"WITHOUT the workspace's environment"* ]]
+  grep -q -- 'new-session -d -s claude-agent-alpha ' "$TMUX_STUB_LOG"
+  ! grep -q 'direnv exec' "$TMUX_STUB_LOG"
 }
