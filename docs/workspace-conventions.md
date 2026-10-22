@@ -106,6 +106,10 @@ Rules that keep it working:
   the machine's `~/.config/gcloud`, and nothing tells you. Missing in a repo you work in? Add it, as its first line.
 - **Sign in only with `CLOUDSDK_CONFIG` pointing into your workspace or profile**: `gcloud auth login`, then
   `gcloud auth application-default login`. If `echo $CLOUDSDK_CONFIG` is empty, stop. Never sign in without it.
+- **Go programs ignore `CLOUDSDK_CONFIG`**: OpenTofu's and Terraform's Google provider look for
+  application-default credentials in `~/.config/gcloud` unless `GOOGLE_APPLICATION_CREDENTIALS` names the file.
+  The `.envrc` ct writes since v0.8.1 sets it. An older one lacks it, so add it after the `CLOUDSDK_CONFIG` line:
+  `export GOOGLE_APPLICATION_CREDENTIALS="$CLOUDSDK_CONFIG/application_default_credentials.json"`.
 - **Any other tool that signs in works the same way**: its config-directory variable goes in the workspace
   `.envrc`, under `$logins`, so it follows the profile.
 - **The agent's own environment is fixed when it starts.** After editing the workspace `.envrc`, run

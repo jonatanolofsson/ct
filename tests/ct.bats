@@ -495,6 +495,11 @@ envrc_gcloud() {
     # shellcheck disable=SC1091
     source ./.envrc && echo "$CLOUDSDK_CONFIG" )
 }
+envrc_adc() {
+  ( cd "$1" && use() { :; }; source_env_if_exists() { :; }
+    # shellcheck disable=SC1091
+    source ./.envrc && echo "$GOOGLE_APPLICATION_CREDENTIALS" )
+}
 
 @test "without a profile, gcloud lives in the workspace itself" {
   ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
@@ -516,4 +521,9 @@ envrc_gcloud() {
   [[ $output == *"not a profile name"* ]]
   [[ ! -e "$HOME/dev/agent-alpha/.envrc" ]]
   ! grep -q new-session "$TMUX_STUB_LOG"
+}
+
+@test "application-default credentials follow gcloud, for Go programs that ignore CLOUDSDK_CONFIG" {
+  ( cd "$HOME/dev/agent-alpha" && CT_PROFILE=acme "$REPO/bin/ct" )
+  [[ "$(envrc_adc "$HOME/dev/agent-alpha")" == "$HOME/dev/.profiles/acme/gcloud/application_default_credentials.json" ]]
 }

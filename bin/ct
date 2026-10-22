@@ -111,6 +111,8 @@ EOF
     cat <<'EOF'
 if [[ -n $ct_profile ]]; then logins="${PWD%/*}/.profiles/$ct_profile"; else logins="$PWD/.config"; fi
 export CLOUDSDK_CONFIG="$logins/gcloud"   # gcloud, and its application-default credentials
+# Go programs (OpenTofu's Google provider) ignore CLOUDSDK_CONFIG and look in ~/.config/gcloud.
+export GOOGLE_APPLICATION_CREDENTIALS="$CLOUDSDK_CONFIG/application_default_credentials.json"
 
 # Tools for the agent outside any clone, if this workspace has a flake of its own.
 if [[ -f flake.nix ]]; then use flake; fi
