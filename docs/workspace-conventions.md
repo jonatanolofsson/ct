@@ -46,9 +46,11 @@ not, so always use it. Never clone from, copy, or edit another workspace's clone
 
 ## Make a new workspace — for a person, or when told to
     mkdir -p <root>/<workspace> && cd <root>/<workspace> && ct    # then add repos with the block above
+    CT_PROFILE=<name> ct                                            # instead, to share a login profile (below)
 
 Tear down = confirm each clone is clean and pushed (`git status`; nothing unpushed), then delete the session dir.
-The canonical creds here are untouched — only the symlinks go.
+The canonical creds here are untouched — only the symlinks go. So is a profile in `.profiles/`: it outlives
+any one workspace.
 
 ## Shared object cache — clone with `--reference` so sessions don't each store the same objects
 Every session cloning the same repos means N copies of identical git objects on disk. Bare **mirror caches**
@@ -95,19 +97,53 @@ and application-default credentials alike (`CLOUDSDK_CONFIG`):
 - **Empty (the default):** the workspace's own, in `<workspace>/.config/gcloud`. Deleting the workspace deletes it.
 - **A name:** a **profile** shared by every workspace that names it, in `.profiles/<name>/gcloud` beside this file.
   Sign in once and all of them use it, for example every workspace of one company. Tearing down one workspace
-  keeps the profile. Choose it at the first launch with `CT_PROFILE=<name> ct`, or later by editing the line.
+  keeps the profile. Choose it at the first launch with `CT_PROFILE=<name> ct`, or later with the recipe below.
+
+Rules that keep it working:
 
 - **Every repo's `.envrc` begins with `source_up_if_exists`.** `direnv exec <clone>` swaps out the environment
   direnv loaded before it, so a clone without that line drops the workspace's settings. gcloud then falls back to
-  the machine's `~/.config/gcloud`, and nothing tells you.
-- **Sign in from inside the workspace**, with `CLOUDSDK_CONFIG` pointing into it: `gcloud auth login`, then
+  the machine's `~/.config/gcloud`, and nothing tells you. Missing in a repo you work in? Add it, as its first line.
+- **Sign in only with `CLOUDSDK_CONFIG` pointing into your workspace or profile**: `gcloud auth login`, then
   `gcloud auth application-default login`. If `echo $CLOUDSDK_CONFIG` is empty, stop. Never sign in without it.
 - **Any other tool that signs in works the same way**: its config-directory variable goes in the workspace
-  `.envrc`, pointing inside the workspace.
-- **After editing the workspace `.envrc`**, run `direnv allow <workspace>` and restart the agent. Its environment
-  is set when it starts. A blocked `.envrc` makes ct start the agent *without* it, with a warning.
+  `.envrc`, under `$logins`, so it follows the profile.
+- **The agent's own environment is fixed when it starts.** After editing the workspace `.envrc`, run
+  `direnv allow <workspace>`. Until the agent is restarted (the site section says how), run commands through
+  `direnv exec <clone> …` from a clone, which reads the edited file. A blocked `.envrc` makes ct start the agent
+  *without* it, with a warning.
 - **OpenCode** runs every workspace's tools in its one shared server, so they don't get the workspace's
   environment. A command run as `direnv exec <clone> …` still does.
+
+### Check or set your workspace's profile — you can do this yourself
+Which profile is a question of **identity**: workspaces that work as the same accounts (one company, one person's
+private work) share a profile, and anything else gets its own. Joining a profile hands this workspace every login
+in it, so if the person has not said which one, ask. Don't guess from a name. To check:
+
+    ws="${CT_WORKSPACE:-$PWD}"; root="${WORKSPACE_ROOT:-${ws%/*}}"
+    grep '^ct_profile=' "$ws/.envrc"                                     # empty: the workspace's own logins
+    (cd "$ws" && direnv exec . sh -c 'echo "$CLOUDSDK_CONFIG"')          # where gcloud actually looks
+    ls "$root/.profiles/"                                                # the profiles that exist
+    grep -l '^ct_profile=<name>$' "$root"/*/.envrc                       # who shares <name>
+
+To set it, **execute this block**. It brings the logins this workspace already has along, so nobody signs in
+again, and it never merges two sets of logins:
+
+    ws="${CT_WORKSPACE:-$PWD}"; root="${WORKSPACE_ROOT:-${ws%/*}}"
+    profile=<name>                                       # [a-z0-9-]; agreed with the person
+    (umask 077 && mkdir -p "$root/.profiles/$profile")
+    if [ -d "$ws/.config/gcloud" ]; then                 # logins of the workspace's own
+      if [ -e "$root/.profiles/$profile/gcloud" ]; then echo "profile has logins: use them, keep yours aside"
+      else mv "$ws/.config/gcloud" "$root/.profiles/$profile/gcloud"; fi
+    fi
+    sed -i "s/^ct_profile=.*/ct_profile=$profile/" "$ws/.envrc" && direnv allow "$ws"
+    (cd "$ws" && direnv exec . sh -c 'echo "$CLOUDSDK_CONFIG"; gcloud auth list')   # the profile's dir and accounts
+
+**Logins still in the machine's `~/.config/gcloud`**, from before this convention, can be brought into a profile
+the same way, without anyone signing in again. Do it only after `CLOUDSDK_CONFIG=~/.config/gcloud gcloud auth list`
+shows nothing but that profile's accounts. **Copy** (`cp -a`), don't move, while other agents still read the
+machine's copy. Delete the machine's copy once no workspace depends on it, and only with the person's go-ahead.
+Never delete a profile that any workspace still names.
 
 ## Sessions share remotes — sync, don't clobber
 Clones are isolated; **the remotes are not**. Another session is very likely pushing to the same `main` while
