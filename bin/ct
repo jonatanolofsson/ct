@@ -76,33 +76,50 @@ agent_root="${agent_ws%/*}"
 
 # --- the workspace's own environment ---
 #
-# Logins belong to a workspace, never to the machine (docs/workspace-conventions.md,
-# "Logins are the workspace's"): two workspaces may work as two different Google
+# No login is the machine's (docs/workspace-conventions.md, "Logins belong to a
+# workspace or a profile"): two workspaces may work as two different Google
 # accounts, and a login in ~/.config is every agent's at once. So a workspace
 # under a root gets an .envrc at its first launch — written once, never
 # overwritten, so the workspace can add its own — and the agent starts through
 # `direnv exec` on it, which gives everything it runs, MCP servers included,
 # that environment. A clone's .envrc inherits it with `source_up_if_exists`.
+#
+# Where the logins live: by default in the workspace itself, deleted with it.
+# CT_PROFILE=<name> at the first launch makes it share a named profile instead,
+# <root>/.profiles/<name>/, with every workspace that names the same one — one
+# sign-in serving, say, every workspace of one company.
+if [[ -n ${CT_PROFILE:-} && ! ${CT_PROFILE} =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+  echo "ct: CT_PROFILE '$CT_PROFILE' is not a profile name ([a-z0-9-])" >&2; exit 2
+fi
 ws_envrc_write() {
   local f="$agent_ws/.envrc"
   ((in_root)) || return 0
   [[ -e $f ]] && return 0
-  cat > "$f" <<'EOF'
+  {
+    cat <<'EOF'
 # This workspace's own environment. ct wrote it at the first launch and never
 # overwrites it, so edit it freely (and run `direnv allow` here afterwards). ct
 # starts the agent through `direnv exec` on this file, and a clone's .envrc that
 # begins with `source_up_if_exists` inherits it.
 #
-# Logins belong to the workspace, never to the machine: one workspace, one set
-# of identities, and deleting the workspace deletes its logins with it.
-export CLOUDSDK_CONFIG="$PWD/.config/gcloud"   # gcloud, and its application-default credentials
+# Whose logins this workspace uses — never the machine's. Empty: its own, kept
+# in the workspace and deleted with it. A name: a profile shared by every
+# workspace that names it (one sign-in serves them all), kept beside the
+# workspaces in .profiles/<name>/, so tearing one workspace down keeps it.
+EOF
+    printf 'ct_profile=%s\n' "${CT_PROFILE:-}"
+    cat <<'EOF'
+if [[ -n $ct_profile ]]; then logins="${PWD%/*}/.profiles/$ct_profile"; else logins="$PWD/.config"; fi
+export CLOUDSDK_CONFIG="$logins/gcloud"   # gcloud, and its application-default credentials
 
 # Tools for the agent outside any clone, if this workspace has a flake of its own.
 if [[ -f flake.nix ]]; then use flake; fi
 
 source_env_if_exists .envrc.local
 EOF
-  echo "ct: wrote $f — this workspace's logins live in the workspace" >&2
+  } > "$f"
+  if [[ -n ${CT_PROFILE:-} ]]; then echo "ct: wrote $f — logins: profile $CT_PROFILE" >&2
+  else echo "ct: wrote $f — logins: this workspace's own" >&2; fi
   if command -v direnv >/dev/null 2>&1; then direnv allow "$agent_ws" >/dev/null 2>&1 || true; fi
 }
 

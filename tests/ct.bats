@@ -8,7 +8,7 @@ setup() {
   export TMUX_STUB_LOG="$BATS_TEST_TMPDIR/tmux.log"
   export TMUX_STUB_SESSIONS="$BATS_TEST_TMPDIR/sessions"
   # Not the caller's ct settings: an agent started by ct-autostart has some set.
-  unset CT_AUTOSTART_GLOB CT_WORKSPACE_ROOT CT_FRESH CT_DETACH CT_AGENT CT_WAKE CT_WAKE_SINCE CT_WAKE_FILE CT_OPENCODE_WEB CT_OPENCODE_SERVER_PORT CT_OPENCODE_SERVER_WAIT CURL_STUB_FAIL CURL_STUB_HEALTH_FAILS CURL_STUB_SESSIONS DIRENV_STUB_BLOCKED
+  unset CT_AUTOSTART_GLOB CT_WORKSPACE_ROOT CT_FRESH CT_DETACH CT_AGENT CT_WAKE CT_WAKE_SINCE CT_WAKE_FILE CT_OPENCODE_WEB CT_OPENCODE_SERVER_PORT CT_OPENCODE_SERVER_WAIT CT_PROFILE CURL_STUB_FAIL CURL_STUB_HEALTH_FAILS CURL_STUB_SESSIONS DIRENV_STUB_BLOCKED
   export DIRENV_STUB_LOG="$BATS_TEST_TMPDIR/direnv.log"
   : > "$TMUX_STUB_LOG"; : > "$TMUX_STUB_SESSIONS"
   export HOME="$BATS_TEST_TMPDIR/home"
@@ -455,7 +455,7 @@ cmd_words() { # session-name -> sets the array W
 
 @test "first launch under a root writes the workspace's .envrc, with gcloud kept in the workspace" {
   ( cd "$HOME/dev/agent-alpha/repo-x" && "$REPO/bin/ct" )
-  grep -q 'export CLOUDSDK_CONFIG="$PWD/.config/gcloud"' "$HOME/dev/agent-alpha/.envrc"
+  grep -qx "ct_profile=" "$HOME/dev/agent-alpha/.envrc"
   grep -q "direnv allow $HOME/dev/agent-alpha" "$DIRENV_STUB_LOG"
   [[ ! -e "$HOME/dev/agent-alpha/repo-x/.envrc" ]]
 }
@@ -484,4 +484,34 @@ cmd_words() { # session-name -> sets the array W
   [[ $output == *"is blocked"*"WITHOUT the workspace's environment"* ]]
   grep -q -- 'new-session -d -s claude-agent-alpha ' "$TMUX_STUB_LOG"
   ! grep -q 'direnv exec' "$TMUX_STUB_LOG"
+}
+
+# Evaluate a written .envrc the way direnv would, from its own directory, and
+# print where it puts gcloud.
+envrc_gcloud() {
+  ( cd "$1" && use() { :; }; source_env_if_exists() { :; }
+    # shellcheck disable=SC1091
+    source ./.envrc && echo "$CLOUDSDK_CONFIG" )
+}
+
+@test "without a profile, gcloud lives in the workspace itself" {
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  [[ "$(envrc_gcloud "$HOME/dev/agent-alpha")" == "$HOME/dev/agent-alpha/.config/gcloud" ]]
+}
+
+@test "CT_PROFILE shares one login dir beside the workspaces, outside each of them" {
+  ( cd "$HOME/dev/agent-alpha" && CT_PROFILE=acme "$REPO/bin/ct" )
+  ( cd "$HOME/dev/agent-alpha-2" && CT_PROFILE=acme "$REPO/bin/ct" )
+  grep -qx "ct_profile=acme" "$HOME/dev/agent-alpha/.envrc"
+  [[ "$(envrc_gcloud "$HOME/dev/agent-alpha")" == "$HOME/dev/.profiles/acme/gcloud" ]]
+  [[ "$(envrc_gcloud "$HOME/dev/agent-alpha-2")" == "$HOME/dev/.profiles/acme/gcloud" ]]
+}
+
+@test "a CT_PROFILE that is not a plain name is refused before anything starts" {
+  export CT_PROFILE='../x'
+  run run_ct "$HOME/dev/agent-alpha"
+  [[ $status -eq 2 ]]
+  [[ $output == *"not a profile name"* ]]
+  [[ ! -e "$HOME/dev/agent-alpha/.envrc" ]]
+  ! grep -q new-session "$TMUX_STUB_LOG"
 }

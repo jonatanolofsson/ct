@@ -85,12 +85,17 @@ sessions share:
 - Delete your own working files when you are finished with them. A file someone else deletes mid-use, or a
   directory a reboot wipes (`/tmp`), is lost work, not cleanup.
 
-## Logins are the workspace's — never the machine's
+## Logins belong to a workspace or a profile — never the machine
 No login is machine-global. Two workspaces may work as two different accounts, and a login under `~/.config` is
 every agent's at once: one agent's `gcloud auth application-default login` silently changes whose identity every
 other agent's tooling uses. So ct writes `<workspace>/.envrc` at a workspace's first launch, and starts the agent
-through `direnv exec` on it. The file keeps gcloud's whole state, accounts and application-default credentials
-alike, in `<workspace>/.config/gcloud` (`CLOUDSDK_CONFIG`). Deleting the workspace deletes its logins.
+through `direnv exec` on it. The file's `ct_profile=` line decides where gcloud keeps its whole state, accounts
+and application-default credentials alike (`CLOUDSDK_CONFIG`):
+
+- **Empty (the default):** the workspace's own, in `<workspace>/.config/gcloud`. Deleting the workspace deletes it.
+- **A name:** a **profile** shared by every workspace that names it, in `.profiles/<name>/gcloud` beside this file.
+  Sign in once and all of them use it, for example every workspace of one company. Tearing down one workspace
+  keeps the profile. Choose it at the first launch with `CT_PROFILE=<name> ct`, or later by editing the line.
 
 - **Every repo's `.envrc` begins with `source_up_if_exists`.** `direnv exec <clone>` swaps out the environment
   direnv loaded before it, so a clone without that line drops the workspace's settings. gcloud then falls back to

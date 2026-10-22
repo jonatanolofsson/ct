@@ -27,6 +27,7 @@ Settings are environment variables, never flags. Every argument is forwarded to 
 | `CT_OPENCODE_SERVER_WAIT` | seconds to wait for that server to answer (default 60) |
 | `CT_OPENCODE_WEB` | URL printed for the OpenCode web UI; `{port}` is replaced by the server's port |
 | `CT_WORKSPACE_ROOT` | a single workspace root instead of `~/dev` and `~/workspaces` |
+| `CT_PROFILE` | at a workspace's first launch: share the named login profile (see below) instead of its own logins |
 
 ct also *exports* two variables into every agent it starts, so the workspace conventions' "Add a repo"
 recipe runs as written: `CT_WORKSPACE` (the agent's workspace) and `WORKSPACE_ROOT` (the root holding
@@ -34,13 +35,14 @@ recipe runs as written: `CT_WORKSPACE` (the agent's workspace) and `WORKSPACE_RO
 | `CT_SESSION_ID` + `CT_NAME` | pin one claude conversation by id, run from its own directory (see below) |
 | `CT_WAKE` | `0`: ct-autostart wakes nobody with a message (see below) |
 
-### The workspace's environment: logins live in the workspace
+### The workspace's environment: logins belong to a workspace or a profile
 
 At a workspace's first launch ct writes `<workspace>/.envrc` (never overwriting one that exists) and starts
-the agent through `direnv exec` on it. The file sets `CLOUDSDK_CONFIG` inside the workspace, so gcloud logins
-and application-default credentials belong to that workspace, not the machine. Each repo's `.envrc` inherits it
-with `source_up_if_exists`. A blocked `.envrc` makes ct warn and start the agent without it, rather than not at
-all. See the conventions, "Logins are the workspace's".
+the agent through `direnv exec` on it. The file sets `CLOUDSDK_CONFIG`, so gcloud logins and
+application-default credentials belong to that workspace, or, with `CT_PROFILE=<name>`, to a profile in
+`<root>/.profiles/<name>/` that every workspace naming it shares. Never to the machine. Each repo's
+`.envrc` inherits it with `source_up_if_exists`. A blocked `.envrc` makes ct warn and start the agent without
+it, rather than not at all. See the conventions, "Logins belong to a workspace or a profile".
 
 ### One OpenCode server, one terminal per workspace
 
