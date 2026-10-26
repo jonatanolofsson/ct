@@ -84,8 +84,12 @@ sessions share:
   for different work, each rewriting the other's, and the first plan's text was lost.
 - **Edit only your own plan.** To change what another agent planned, message it. Never edit its file, not even to
   add a section about your own work.
-- Delete your own working files when you are finished with them. A file someone else deletes mid-use, or a
-  directory a reboot wipes (`/tmp`), is lost work, not cleanup.
+- **Scratch files** go in `<workspace>/.scratch/`. Delete your own when you are finished with them. A file
+  someone else deletes mid-use, or a directory a reboot wipes (`/tmp`), is lost work, not cleanup.
+- **Delete scratch files with a plain `rm` and literal paths** (`rm -f <workspace>/.scratch/x.json`). That runs
+  without a prompt: ct registers `ct-scratch-guard`, a hook that allows `rm` only inside a workspace's
+  `.scratch/`. Any other `rm` asks, and so does an `rm` it cannot check: one with a variable, a glob, `$(…)`,
+  `sudo`, or a relative path after a `cd`.
 
 ## Logins belong to a workspace or a profile — never the machine
 No login is machine-global. Two workspaces may work as two different accounts, and a login under `~/.config` is

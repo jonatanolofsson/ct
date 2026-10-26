@@ -1,0 +1,110 @@
+#!/usr/bin/env perl
+# ct-scratch-guard — Claude Code PreToolUse hook (Bash):
+#   `rm` inside a workspace .scratch/ runs unprompted; every other `rm` asks.
+#
+#   ct-scratch-guard <workspace-root>      (install.sh registers it with CT_HOME)
+#
+# Why a hook and not permission rules: an `ask` rule is evaluated whatever a
+# hook returns, and no rule syntax can say "rm, but only under .scratch". The
+# conventions tell every agent to delete its own scratch files
+# (docs/workspace-conventions.md), and with `ask: Bash(rm *)` each deletion
+# prompted. So that rule leaves the settings and this hook carries the policy:
+#
+#   no rm in the command                       -> no output (normal permission flow)
+#   every rm touches only <root>/<ws>/.scratch/<something>   -> "allow"
+#   any other rm                               -> "ask" (as the rule did, auto mode too)
+#
+# Doubt always means ask: variables, globs, $(...), backticks, sudo, an
+# unparseable command, `.scratch` itself, a path leaving .scratch via `..` or a
+# symlinked directory, a relative path after `cd`. Deny rules still win. If the
+# hook itself fails, Claude Code's normal flow runs, which prompts for rm: the
+# failure mode is the old prompt, never a silent deletion.
+#
+# perl with core modules only (JSON::PP, Text::ParseWords, Cwd), because jq and
+# python3 are not on every base image ct installs onto.
+use strict;
+use warnings;
+use JSON::PP;
+use Text::ParseWords qw(shellwords);
+use Cwd qw(abs_path);
+use File::Basename qw(basename dirname);
+
+my $root = shift @ARGV;
+exit 0 unless defined $root && length $root;
+$root =~ s{/+$}{};
+
+my $raw = do { local $/; <STDIN> };
+my $in = eval { decode_json($raw // '') };
+exit 0 unless ref $in eq 'HASH';
+my $cmd = $in->{tool_input}{command} // '';
+my $cwd = $in->{cwd} // '';
+exit 0 unless length $cmd;
+
+sub emit {
+    my ($decision, $reason) = @_;
+    print encode_json({ hookSpecificOutput => {
+        hookEventName => 'PreToolUse',
+        permissionDecision => $decision,
+        permissionDecisionReason => $reason } }), "\n";
+    exit 0;
+}
+
+# Does the command involve rm at all? (a word; rmdir is not rm)
+exit 0 unless $cmd =~ m{(?:^|[^\w./-])\\?(?:/usr)?(?:/bin/)?rm(?:\s|$)};
+
+# rm next to a substitution cannot be inspected: ask (the old rule did too).
+emit('ask', 'rm together with a command substitution: confirm')
+    if $cmd =~ /\$\(|`|<\(|>\(/;
+
+my $has_cd = ($cmd =~ /(?:^|[;&|(\s])(?:cd|pushd|popd)(?:\s|$)/) ? 1 : 0;
+
+sub in_scratch {    # one path argument -> true if strictly inside <root>/<ws>/.scratch/
+    my ($p) = @_;
+    return 0 if $p =~ /[*?\[{]/ || $p =~ /^~/;
+    if ($p !~ m{^/}) {                                   # relative
+        return 0 if $has_cd || !length $cwd;
+        $p = "$cwd/$p";
+    }
+    my $base = basename($p);
+    return 0 if $base eq '' || $base eq '.' || $base eq '..' || $base eq '.scratch';
+    my $dir = dirname($p);
+    return 0 unless -d $dir;
+    my $parent = abs_path($dir) // return 0;
+    return 0 unless index($parent, "$root/") == 0;
+    my ($ws) = substr($parent, length($root) + 1) =~ m{^([^/]+)};
+    return 0 unless defined $ws;
+    my $scratch = "$root/$ws/.scratch";
+    return 0 if -l $scratch || !-d $scratch;
+    return $parent eq $scratch || index($parent, "$scratch/") == 0;
+}
+
+my $found = 0;
+for my $seg (split /\|\||&&|;|\||&|\n/, $cmd) {
+    $seg =~ s/^[\s({]+//;
+    next unless length $seg;
+    my @t = shellwords($seg);
+    emit('ask', 'rm with a command line I cannot parse: confirm') unless @t;
+    my $i;
+    my $w = $t[0];
+    if ($w =~ m{^\\?(?:/usr)?(?:/bin/)?rm$}) { $i = 0 }
+    elsif ($w =~ /^(?:command|env|nice|time|builtin)$/) { next unless ($t[1] // '') eq 'rm'; $i = 1 }
+    elsif ($w =~ /^(?:sudo|doas)$/) { emit('ask', 'rm as root: confirm') if grep { $_ eq 'rm' } @t; next }
+    elsif ($w eq 'direnv') { next unless ($t[1] // '') eq 'exec' && ($t[3] // '') eq 'rm'; $i = 3 }
+    else { next }                                         # rm only as a word in another command
+    $found = 1;
+    emit('ask', 'rm with a variable in its arguments: confirm') if $seg =~ /\$/;
+    my $paths = 0;
+    for my $a (@t[$i + 1 .. $#t]) {
+        next if $a eq '--';
+        next if $a =~ /^(?:\d*[<>]|\d+$)/;                  # redirections: 2>/dev/null, the 1 of 2>&1
+        if ($a =~ /^-/) {
+            next if $a =~ /^-[rRfiv]+$/ || $a =~ /^--(?:force|recursive|verbose|interactive=never)$/;
+            emit('ask', "rm with option '$a': confirm");
+        }
+        emit('ask', 'rm outside a workspace .scratch/: confirm') unless in_scratch($a);
+        $paths++;
+    }
+    emit('ask', 'rm without a path: confirm') unless $paths;
+}
+emit('allow', 'rm only inside a workspace .scratch/') if $found;
+exit 0;
