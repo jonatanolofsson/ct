@@ -21,6 +21,7 @@ jobs:
       - name: lint
         run: |
           bash -n bin/ct bin/ct-autostart bin/ensure-nix install.sh
+          perl -c bin/ct-scratch-guard
           shellcheck -x bin/ct bin/ct-autostart bin/ensure-nix install.sh
       - name: test
         run: bats tests/

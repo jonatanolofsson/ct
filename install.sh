@@ -11,11 +11,12 @@
 #              without a checkout (curl mode)
 #
 # What it does:
-#   1. installs bin/{ct,ct-autostart,ensure-nix} into CT_PREFIX
+#   1. installs bin/{ct,ct-autostart,ensure-nix,ct-scratch-guard} into CT_PREFIX
 #   2. writes the generic workspace conventions into CT_HOME/CLAUDE.md inside
 #      a <!-- BEGIN ct-managed --> marker block (hand edits outside survive;
 #      site layers add their own block — see docs/bootstrap-integration.md)
-#   3. seeds ~/.claude/settings.json from the template ONLY if none exists
+#   3. seeds ~/.claude/settings.json from the template ONLY if none exists,
+#      then adds what later releases need (plansDirectory, the scratch guard)
 #   4. stamps ~/.local/share/ct/VERSION
 set -euo pipefail
 
@@ -51,10 +52,10 @@ fi
 
 # --- 1. binaries (replace only on success; old copies survive any failure) --
 mkdir -p "$CT_PREFIX"
-for tool in ct ct-autostart ensure-nix; do
+for tool in ct ct-autostart ensure-nix ct-scratch-guard; do
     install -m 0755 "$srcdir/bin/$tool" "$CT_PREFIX/$tool"
 done
-say "installed ct, ct-autostart, ensure-nix -> $CT_PREFIX"
+say "installed ct, ct-autostart, ensure-nix, ct-scratch-guard -> $CT_PREFIX"
 
 # --- 2. workspace root + conventions block ---------------------------------
 mkdir -p "$CT_HOME"
@@ -110,6 +111,51 @@ perl -MJSON::PP -e '
     chmod $mode, "$f.ct-tmp"; rename "$f.ct-tmp", $f or die "rename: $!\n";
     print STDERR "ct-install: added plansDirectory=.claude/plans to $f\n";
 ' "$settings"
+
+# --- 3c. scratch deletions run unprompted (the guard replaces `ask: rm`) -----
+# The conventions tell every agent to delete its own .scratch files, and the
+# template's `ask: Bash(rm *)` prompted for each one. An ask rule wins over any
+# hook, so the rule itself has to go and ct-scratch-guard (a PreToolUse hook)
+# carries the policy: rm inside <CT_HOME>/<ws>/.scratch/ is allowed, every other
+# rm still asks. Register the hook (or repoint it if CT_PREFIX/CT_HOME moved),
+# and only then remove exactly the two rules the template shipped; rules anyone
+# added themselves are left alone. Rewritten only when something changes.
+perl -MJSON::PP -e '
+    my ($f, $guard, $home) = @ARGV;
+    local $/; open(my $in, "<", $f) or exit 0; my $raw = <$in>; close $in;
+    my $d = eval { JSON::PP->new->relaxed->decode($raw) };
+    if (!defined $d || ref $d ne "HASH") { print STDERR "ct-install: $f is not a JSON object; scratch guard not registered\n"; exit 0 }
+    my $q = sub { my $s = shift; $s =~ s/\x27/\x27\\\x27\x27/g; "\x27$s\x27" };
+    my $want = $q->($guard) . " " . $q->($home);
+    my $changed = 0;
+    $d->{hooks} = {} unless ref $d->{hooks} eq "HASH";
+    $d->{hooks}{PreToolUse} = [] unless ref $d->{hooks}{PreToolUse} eq "ARRAY";
+    my $found = 0;
+    for my $m (@{ $d->{hooks}{PreToolUse} }) {
+        next unless ref $m eq "HASH" && ref $m->{hooks} eq "ARRAY";
+        for my $h (@{ $m->{hooks} }) {
+            next unless ref $h eq "HASH" && ($h->{command} // "") =~ m{ct-scratch-guard\x27? };
+            $found = 1;
+            if ($h->{command} ne $want) { $h->{command} = $want; $changed = 1 }
+        }
+    }
+    unless ($found) {
+        push @{ $d->{hooks}{PreToolUse} },
+            { matcher => "Bash", hooks => [ { type => "command", command => $want, timeout => 10 } ] };
+        $changed = 1;
+    }
+    if (ref $d->{permissions} eq "HASH" && ref $d->{permissions}{ask} eq "ARRAY") {
+        my %old = map { $_ => 1 } ("Bash(rm *)", "Bash(direnv exec*rm *)");
+        my @keep = grep { !$old{$_} } @{ $d->{permissions}{ask} };
+        if (@keep != @{ $d->{permissions}{ask} }) { $d->{permissions}{ask} = \@keep; $changed = 1 }
+    }
+    exit 0 unless $changed;
+    my $mode = (stat $f)[2] & 07777;
+    open(my $out, ">", "$f.ct-tmp") or die "write $f.ct-tmp: $!\n";
+    print $out JSON::PP->new->pretty->canonical->encode($d); close $out;
+    chmod $mode, "$f.ct-tmp"; rename "$f.ct-tmp", $f or die "rename: $!\n";
+    print STDERR "ct-install: registered ct-scratch-guard in $f (rm inside .scratch/ no longer prompts)\n";
+' "$settings" "$CT_PREFIX/ct-scratch-guard" "$CT_HOME"
 
 # --- 4. version stamp -------------------------------------------------------
 mkdir -p "$HOME/.local/share/ct"

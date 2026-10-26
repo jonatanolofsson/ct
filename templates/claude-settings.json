@@ -1,5 +1,5 @@
 {
-  "//": "Starting-point permissions for Claude Code in a ct workspace. The split is read-vs-mutate: reads are allowed, mutations ask. Every rule is doubled for `direnv exec .` because nix-flake repos run tools through direnv. Copy to ~/.claude/settings.json and add your own path grants (Edit/Write/Read roots, permissions.additionalDirectories) — deliberately not included here.",
+  "//": "Starting-point permissions for Claude Code in a ct workspace. The split is read-vs-mutate: reads are allowed, mutations ask. Every rule is doubled for `direnv exec .` because nix-flake repos run tools through direnv. `rm` is not here: install.sh registers ct-scratch-guard, a hook that lets rm inside a workspace .scratch/ run and asks for every other rm (an ask rule would override it). Copy to ~/.claude/settings.json and add your own path grants (Edit/Write/Read roots, permissions.additionalDirectories) — deliberately not included here.",
   "plansDirectory": ".claude/plans",
   "permissions": {
     "allow": [
@@ -40,7 +40,6 @@
       "Bash(rm -rf /*)"
     ],
     "ask": [
-      "Bash(rm *)",
       "Bash(git push --force*)",
       "Bash(git reset --hard*)",
       "Bash(git checkout -- *)",
@@ -66,7 +65,6 @@
       "Bash(helm upgrade*)",
       "Bash(helm uninstall*)",
       "Bash(helm rollback*)",
-      "Bash(direnv exec*rm *)",
       "Bash(direnv exec*git push --force*)",
       "Bash(direnv exec*git reset --hard*)",
       "Bash(direnv exec*git checkout -- *)",
