@@ -133,10 +133,22 @@ CLAUDE_CONFIG_DIR="$logins/claude"; fi` after the gcloud lines). Without a profi
     ct-profile claude <name>             # its own claude.ai login: sign in once with `claude /login`
     ct-profile claude <name> bedrock     # the site's backend, from $CT_BEDROCK_SETTINGS: no login
     ct-profile move <workspace> <name>   # copy the workspace's conversations and memory into it
+    ct-profile move <workspace> <name> --own-accounts   # ...and let Remote Control show their history
 
 A new profile starts from the machine's `~/.claude/settings.json` (hooks, permissions, `plansDirectory`) and links
 its skills, agents, commands and plugins; it never copies a login. A conversation copied into a profile resumes
 there with its whole history, on the profile's backend.
+
+**Move with the agent stopped:** `touch ~/.ct-noautostart`, `tmux kill-session -t =claude-<workspace>`, then
+move, then `rm ~/.ct-noautostart`. `move` refuses while the agent runs, because the copy would miss its last turns.
+
+**Remote Control belongs to a claude.ai account.** A conversation that was linked to it under one account and then
+resumes under another shows there without its history or its name: Claude Code records a veto in the transcript
+(`history-suppression`) on the first such start, and renews it on every later one. `/rename` does not reach the
+remote session. When the profile's account is also the person's, move with `--own-accounts`, before the agent
+first starts in the profile: each conversation is copied under a new id without its Remote Control rows, so it
+comes up as a new remote session with its whole history and its name. The old remote sessions stay under the old
+account; archive them there. Don't use it to move a conversation into someone else's account.
 
 **A workspace's name says who pays.** One ending in `-bedrock` uses a bedrock profile, and no other workspace
 does; ct warns at start when the two disagree.

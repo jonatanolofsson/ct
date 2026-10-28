@@ -5,6 +5,9 @@
 #   ct-profile claude <name> bedrock   one that runs Claude on the backend the
 #                                      site defines in $CT_BEDROCK_SETTINGS
 #   ct-profile move <workspace> <name> bring a workspace's conversations along
+#        [--own-accounts]              ...and their Remote Control history, when
+#                                      the profile's claude.ai account is also
+#                                      the person's (see move below)
 #
 # A profile is <root>/.profiles/<name>/ (docs/workspace-conventions.md); a
 # workspace naming it in its .envrc gets CLAUDE_CONFIG_DIR=<profile>/claude.
@@ -42,23 +45,82 @@ claude_profile() { # name [bedrock]
   echo "ct-profile: $dir ready ($kind)" >&2
 }
 
-move() { # workspace name
-  local ws="$1" name="$2" from to
+# A conversation that was linked to Remote Control carries `bridge-session`
+# rows naming the claude.ai account it was linked under. Resumed under another
+# account, Claude Code writes a `history-suppression` row
+# (restored_owner_mismatch) and opens a remote session without its history or
+# its name, and every later start renews the veto. That guard is right when the
+# accounts belong to different people. --own-accounts says they are both the
+# person's: each conversation is copied under a new id without those rows, so
+# its first start in the profile opens a remote session with the whole history.
+move() { # workspace name [--own-accounts]
+  local ws="$1" name="$2" own="${3:-}" from to f id new n=0 linked=0
   [[ -d $ws ]] || die "no workspace $ws"
+  [[ -z $own || $own == --own-accounts ]] || die "unknown option '$own'"
   from="$HOME/.claude/projects/$(key "$ws")"
   to="$root/.profiles/$name/claude/projects/$(key "$ws")"
   [[ -d "$root/.profiles/$name/claude" ]] || die "no profile $name (ct-profile claude $name first)"
   [[ -d $from ]] || { echo "ct-profile: nothing to move ($from does not exist)" >&2; return 0; }
+  # A running agent keeps writing the original, so the copy would miss its last
+  # turns; ct-autostart would start it again within minutes, hence the pause.
+  if tmux has-session -t "=claude-$(ws_key "$ws")" 2>/dev/null; then
+    die "the agent of ${ws##*/} is running: touch ~/.ct-noautostart, tmux kill-session -t =claude-$(ws_key "$ws"), then move"
+  fi
+  if [[ -n $own ]] && has_transcripts "$to"; then
+    die "$to already has conversations: --own-accounts copies under new ids, so a second run would duplicate them"
+  fi
   mkdir -p "$to"
   # Copy, not move: the conversation stays where it was, too, until the person
   # is sure (docs/workspace-conventions.md). A resume in the profile carries on
   # with the whole history, on whatever backend the profile uses.
-  cp -a "$from/." "$to/"
-  echo "ct-profile: copied $(find "$to" -maxdepth 1 -name '*.jsonl' | wc -l) conversation(s) into $name" >&2
+  if [[ -z $own ]]; then
+    cp -a "$from/." "$to/"
+    for f in "$to"/*.jsonl; do
+      [[ -e $f ]] || continue
+      id="$(basename "$f" .jsonl)"; n=$((n + 1))
+      if grep -q '"type":"bridge-session"' "$f"; then linked=$((linked + 1)); fi
+      copy_history "$id" "$id" "$name"
+    done
+    echo "ct-profile: copied $n conversation(s) into $name" >&2
+    if (( linked > 0 )); then
+      echo "ct-profile: $linked of them were linked to Remote Control; if $name signs in to another claude.ai account, they show there without history or name (see --own-accounts)" >&2
+    fi
+    return 0
+  fi
+  for f in "$from"/*; do
+    [[ -e $f && $f != *.jsonl ]] || continue
+    id="$(basename "$f")"
+    # memory and the like; a conversation's own directory follows it below
+    [[ -e $from/$id.jsonl ]] || cp -a "$f" "$to/"
+  done
+  for f in "$from"/*.jsonl; do
+    [[ -e $f ]] || continue
+    id="$(basename "$f" .jsonl)"; new="$(new_id)"; n=$((n + 1))
+    grep -v -e '"type":"bridge-session"' -e '"type":"history-suppression"' "$f" | sed "s/$id/$new/g" > "$to/$new.jsonl" || true
+    chmod --reference="$f" "$to/$new.jsonl"
+    touch -r "$f" "$to/$new.jsonl"   # ct resumes the newest transcript: keep their order
+    if [[ -d $from/$id ]]; then cp -a "$from/$id" "$to/$new"; fi
+    copy_history "$id" "$new" "$name"
+  done
+  echo "ct-profile: copied $n conversation(s) into $name under new ids, unlinked from Remote Control" >&2
+}
+
+copy_history() { # old-id new-id profile: the checkpoints /rewind restores from
+  local src="$HOME/.claude/file-history/$1" dst="$root/.profiles/$3/claude/file-history/$2"
+  [[ -d $src && ! -e $dst ]] || return 0
+  mkdir -p "${dst%/*}"; cp -a "$src" "$dst"
+}
+
+has_transcripts() { local f; for f in "$1"/*.jsonl; do [[ -e $f ]] && return 0; done; return 1; }
+ws_key() { printf '%s' "${1##*/}" | tr -c 'A-Za-z0-9_-' '-'; }   # as ct-autostart names sessions
+
+new_id() {
+  if [[ -r /proc/sys/kernel/random/uuid ]]; then cat /proc/sys/kernel/random/uuid
+  else uuidgen | tr '[:upper:]' '[:lower:]'; fi
 }
 
 case "${1:-}" in
   claude) shift; [[ $# -ge 1 ]] || die "usage: ct-profile claude <name> [bedrock]"; claude_profile "$@" ;;
-  move)   shift; [[ $# -eq 2 ]] || die "usage: ct-profile move <workspace> <name>"; move "$@" ;;
-  *) die "usage: ct-profile claude <name> [bedrock] | move <workspace> <name>" ;;
+  move)   shift; [[ $# -eq 2 || $# -eq 3 ]] || die "usage: ct-profile move <workspace> <name> [--own-accounts]"; move "$@" ;;
+  *) die "usage: ct-profile claude <name> [bedrock] | move <workspace> <name> [--own-accounts]" ;;
 esac

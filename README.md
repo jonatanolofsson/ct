@@ -48,7 +48,8 @@ it, rather than not at all. See the conventions, "Logins belong to a workspace o
 A profile also carries a Claude Code identity: the `.envrc` points `CLAUDE_CONFIG_DIR` at
 `<root>/.profiles/<name>/claude`, so a profile has its own claude.ai login or its own backend, settings and
 conversations, and ct resumes from there. `ct-profile claude <name> [bedrock]` sets one up and `ct-profile move`
-copies a workspace's conversations into it. A workspace named `*-bedrock` should use a bedrock profile; ct warns
+copies a workspace's conversations into it (with `--own-accounts`, so that Remote Control shows their history under
+the profile's claude.ai account too). A workspace named `*-bedrock` should use a bedrock profile; ct warns
 when the name and the profile disagree.
 
 ### One OpenCode server, one terminal per workspace
