@@ -123,6 +123,24 @@ Rules that keep it working:
 - **OpenCode** runs every workspace's tools in its one shared server, so they don't get the workspace's
   environment. A command run as `direnv exec <clone> …` still does.
 
+### Claude Code follows the profile too
+A profile also holds a whole Claude Code identity in `.profiles/<name>/claude`: its login or the backend it calls,
+its settings, transcripts and memory. The workspace `.envrc` exports `CLAUDE_CONFIG_DIR` there when `ct_profile=`
+is set (an older `.envrc` lacks the line: add `if [[ -n $ct_profile ]]; then export
+CLAUDE_CONFIG_DIR="$logins/claude"; fi` after the gcloud lines). Without a profile, Claude keeps the machine's
+`~/.claude`, as before. ct and ct-autostart look for a workspace's conversations in the same place.
+
+    ct-profile claude <name>             # its own claude.ai login: sign in once with `claude /login`
+    ct-profile claude <name> bedrock     # the site's backend, from $CT_BEDROCK_SETTINGS: no login
+    ct-profile move <workspace> <name>   # copy the workspace's conversations and memory into it
+
+A new profile starts from the machine's `~/.claude/settings.json` (hooks, permissions, `plansDirectory`) and links
+its skills, agents, commands and plugins; it never copies a login. A conversation copied into a profile resumes
+there with its whole history, on the profile's backend.
+
+**A workspace's name says who pays.** One ending in `-bedrock` uses a bedrock profile, and no other workspace
+does; ct warns at start when the two disagree.
+
 ### Check or set your workspace's profile — you can do this yourself
 Which profile is a question of **identity**: workspaces that work as the same accounts (one company, one person's
 private work) share a profile, and anything else gets its own. Joining a profile hands this workspace every login

@@ -514,6 +514,30 @@ envrc_adc() {
   [[ "$(envrc_gcloud "$HOME/dev/agent-alpha-2")" == "$HOME/dev/.profiles/acme/gcloud" ]]
 }
 
+envrc_claude() {
+  ( cd "$1" && use() { :; }; source_env_if_exists() { :; }; unset CLAUDE_CONFIG_DIR
+    # shellcheck disable=SC1091
+    source ./.envrc && echo "${CLAUDE_CONFIG_DIR:-unset}" )
+}
+
+@test "a profile carries its own Claude config; without one, Claude keeps ~/.claude" {
+  ( cd "$HOME/dev/agent-alpha" && CT_PROFILE=acme "$REPO/bin/ct" )
+  [[ "$(envrc_claude "$HOME/dev/agent-alpha")" == "$HOME/dev/.profiles/acme/claude" ]]
+  ( cd "$HOME/dev/agent-alpha-2" && "$REPO/bin/ct" )
+  [[ "$(envrc_claude "$HOME/dev/agent-alpha-2")" == "unset" ]]
+}
+
+@test "a profile workspace resumes from the profile's transcripts, not ~/.claude" {
+  ( cd "$HOME/dev/agent-alpha" && CT_PROFILE=acme CT_FRESH=1 "$REPO/bin/ct" )
+  : > "$TMUX_STUB_LOG"; : > "$TMUX_STUB_SESSIONS"
+  key="$HOME/dev/.profiles/acme/claude/projects/$(printf '%s' "$HOME/dev/agent-alpha" | tr -c 'A-Za-z0-9' '-')"
+  mkdir -p "$key"; for _ in $(seq 60); do echo '{"type":"user"}'; done > "$key/pppppppp-1111.jsonl"
+  mkts "$HOME/dev/agent-alpha" "hhhhhhhh-2222" 200     # one in ~/.claude must NOT be picked
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  grep -q -- '--resume pppppppp-1111' "$TMUX_STUB_LOG"
+  ! grep -q -- 'hhhhhhhh-2222' "$TMUX_STUB_LOG"
+}
+
 @test "a CT_PROFILE that is not a plain name is refused before anything starts" {
   export CT_PROFILE='../x'
   run run_ct "$HOME/dev/agent-alpha"

@@ -251,6 +251,17 @@ setup() {
 
 mkrecord() { mkdir -p "$HOME/.local/share/ct/agents"; printf '%b' "$2" > "$HOME/.local/share/ct/agents/$1"; }
 
+@test "a profile workspace's transcript is looked for in the profile's Claude config" {
+  touch "$HOME/.ct-autostart"
+  printf 'ct_profile=acme\n' > "$HOME/dev/agent-one/.envrc"
+  key="$HOME/dev/.profiles/acme/claude/projects/$(printf '%s' "$HOME/dev/agent-one" | tr -c 'A-Za-z0-9' '-')"
+  mkdir -p "$key"; for _ in $(seq 60); do echo '{"sessionId":"x"}'; done > "$key/x.jsonl"
+  mkrecord agent-two ''
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  [[ "$output" == *"agent-one: started"* ]]
+  [[ "$output" != *"agent-one: started (no transcript yet"* ]]
+}
+
 @test "no record: claude only, exactly as before agents existed" {
   touch "$HOME/.ct-autostart"
   run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
