@@ -97,7 +97,15 @@ fi
 # rewritten only when the key is actually added. perl + JSON::PP because they
 # are core on every base image this runs on at boot; jq, python3 and node are
 # not.
-settings="$HOME/.claude/settings.json"
+# Every Claude settings file ct manages: the machine's, and each profile's
+# (<CT_HOME>/.profiles/<name>/claude, ct >= 0.10). A profile is seeded from the
+# machine's file once, at creation, so a later release's settings would never
+# reach it otherwise. Both steps below are idempotent per file.
+claude_settings=("$HOME/.claude/settings.json")
+for f in "$CT_HOME"/.profiles/*/claude/settings.json; do
+    [ -f "$f" ] && claude_settings+=("$f")
+done
+for settings in "${claude_settings[@]}"; do
 perl -MJSON::PP -e '
     my $f = shift;
     local $/; open(my $in, "<", $f) or exit 0; my $raw = <$in>; close $in;
@@ -156,6 +164,7 @@ perl -MJSON::PP -e '
     chmod $mode, "$f.ct-tmp"; rename "$f.ct-tmp", $f or die "rename: $!\n";
     print STDERR "ct-install: registered ct-scratch-guard in $f (rm inside .scratch/ no longer prompts)\n";
 ' "$settings" "$CT_PREFIX/ct-scratch-guard" "$CT_HOME"
+done
 
 # --- 4. version stamp -------------------------------------------------------
 mkdir -p "$HOME/.local/share/ct"

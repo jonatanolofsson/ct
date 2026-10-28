@@ -377,15 +377,45 @@ run_round() {
 # session, and — if it is the last one — the tmux server with it. Only when some
 # workspace runs claude: opencode reads its keys from the environment and has no
 # token to race on.
-wants_claude() {
-  units | cut -d "$US" -f1 | grep -qx claude
+#
+# Once per Claude config (ct >= 0.10: a profile carries its own login): every
+# account profile's agents would otherwise refresh ITS token together. A config
+# with no claude.ai login (a bedrock profile: a key helper, no token) has
+# nothing to refresh and is skipped.
+claude_configs() { # the distinct config dirs of the workspaces that run claude
+  local u a _port _name _lbl _display dir _sid us=()
+  mapfile -t us < <(units)
+  for u in "${us[@]}"; do
+    IFS=$US read -r a _port _name _lbl _display dir _sid <<<"$u"
+    [[ $a == claude ]] || continue
+    claude_dir "$dir"; echo
+  done | awk 'NF && !seen[$0]++'
 }
-if [[ -z "${CT_AUTOSTART_NO_WARMUP:-}" ]] && wants_claude; then
-  if timeout 90 claude -p 'ok' >/dev/null 2>&1; then
-    log "credential warm-up ok"
-  else
-    log "credential warm-up failed (continuing anyway)"
-  fi
+has_login() { # config dir -> true when it holds a claude.ai login
+  [[ -f "$1/.credentials.json" ]] && return 0
+  # ~/.claude keeps the account beside it, in ~/.claude.json; a profile inside.
+  local state="$1/.claude.json"
+  [[ $1 == "$HOME/.claude" ]] && state="$HOME/.claude.json"
+  command -v jq >/dev/null 2>&1 &&
+    [[ $(jq -r '.oauthAccount.accountUuid // empty' "$state" 2>/dev/null) != "" ]]
+}
+if [[ -z "${CT_AUTOSTART_NO_WARMUP:-}" ]]; then
+  while IFS= read -r cfg; do
+    [[ -n $cfg ]] || continue
+    label="${cfg/#$HOME/\~}"
+    if [[ $cfg != "$HOME/.claude" ]] && ! has_login "$cfg"; then
+      log "credential warm-up: $label has no claude.ai login (key helper or none) — skipped"; continue
+    fi
+    # The machine's ~/.claude takes no CLAUDE_CONFIG_DIR: that is how it was
+    # warmed before profiles, and how its agents run.
+    if [[ $cfg == "$HOME/.claude" ]]; then
+      env -u CLAUDE_CONFIG_DIR timeout 90 claude -p 'ok' >/dev/null 2>&1 && r=ok || r=failed
+    else
+      CLAUDE_CONFIG_DIR="$cfg" timeout 90 claude -p 'ok' >/dev/null 2>&1 && r=ok || r=failed
+    fi
+    if [[ $r == ok ]]; then log "credential warm-up ok ($label)"
+    else log "credential warm-up failed ($label, continuing anyway)"; fi
+  done < <(claude_configs)
 fi
 
 case "$mode" in

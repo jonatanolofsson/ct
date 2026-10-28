@@ -155,3 +155,17 @@ guard_cmd() { printf "'%s' '%s'" "$CT_PREFIX/ct-scratch-guard" "$CT_HOME"; }
   "$REPO/install.sh" 2>/dev/null
   grep -q '<workspace>/.claude/plans/' "$CT_HOME/CLAUDE.md"
 }
+
+@test "every profile's Claude settings get the scratch guard and plansDirectory, not only ~/.claude" {
+  mkdir -p "$CT_HOME/.profiles/acme/claude" "$CT_HOME/.profiles/gw/claude"
+  echo '{"model":"m"}' > "$CT_HOME/.profiles/acme/claude/settings.json"
+  echo '{"plansDirectory":"mine","hooks":{"PreToolUse":[]}}' > "$CT_HOME/.profiles/gw/claude/settings.json"
+  "$REPO/install.sh" 2>/dev/null
+  for p in acme gw; do
+    jq -e --arg g "$CT_PREFIX/ct-scratch-guard" '[.hooks.PreToolUse[].hooks[].command | select(contains($g))] | length == 1' "$CT_HOME/.profiles/$p/claude/settings.json"
+  done
+  jq -e '.plansDirectory == ".claude/plans" and .model == "m"' "$CT_HOME/.profiles/acme/claude/settings.json"
+  jq -e '.plansDirectory == "mine"' "$CT_HOME/.profiles/gw/claude/settings.json"   # a choice is kept
+  "$REPO/install.sh" 2>/dev/null                                                  # idempotent
+  jq -e '[.hooks.PreToolUse[].hooks[].command | select(contains("ct-scratch-guard"))] | length == 1' "$CT_HOME/.profiles/acme/claude/settings.json"
+}

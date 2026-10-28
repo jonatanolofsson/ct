@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 # claude stub: records argv (used by ct-autostart's warm-up; ct itself only
-# ever hands the string to tmux).
-echo "claude $*" >> "${CLAUDE_STUB_LOG:-/dev/null}"
+# ever hands the string to tmux), and which Claude config the call ran with.
+echo "claude $* [config=${CLAUDE_CONFIG_DIR:-~/.claude}]" >> "${CLAUDE_STUB_LOG:-/dev/null}"
 exit 0

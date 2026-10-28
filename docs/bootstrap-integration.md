@@ -115,7 +115,14 @@ whenever it launches an agent, with one line per agent: `claude` or `opencode` (
 `ct-autostart` never builds a command line itself. It starts every recorded agent with
 `CT_AGENT=<agent> CT_DETACH=1 ct`, so ct remains the only place that knows how to launch one. The
 credential warm-up (`claude -p ok`) runs only when some workspace records `claude`; OpenCode reads its
-keys from the environment and has no OAuth token to race on.
+keys from the environment and has no OAuth token to race on. It runs once per Claude config the
+workspaces use: `~/.claude` and each profile signed in to claude.ai (ct >= 0.10), so the agents of one
+profile don't refresh its token together. A profile without a claude.ai login (a key helper, such as a
+Bedrock gateway) has no token and is skipped.
+
+The installer updates the scratch guard and `plansDirectory` in every profile's
+`.profiles/<name>/claude/settings.json` as well as `~/.claude/settings.json`, so a profile created by an
+earlier release gets what a later one adds.
 
 Every pass also reads the screen of each session that was already running and
 logs `WARNING — running, but …` when it is blank, unreadable, or does not show

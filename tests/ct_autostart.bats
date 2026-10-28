@@ -65,6 +65,21 @@ setup() {
   ! grep -q -- 'claude -p' "$CLAUDE_STUB_LOG"
 }
 
+@test "warm-up runs once per Claude config: the machine's and each signed-in profile, never twice" {
+  touch "$HOME/.ct-autostart"
+  mkdir -p "$HOME/dev/agent-three" "$HOME/dev/agent-four"
+  for ws in agent-one agent-two; do printf 'ct_profile=acme\n' > "$HOME/dev/$ws/.envrc"; done
+  printf 'ct_profile=gw\n' > "$HOME/dev/agent-three/.envrc"
+  mkdir -p "$HOME/dev/.profiles/acme/claude" "$HOME/dev/.profiles/gw/claude"
+  echo '{}' > "$HOME/dev/.profiles/acme/claude/.credentials.json"   # a login
+  echo '{}' > "$HOME/dev/.profiles/gw/claude/.claude.json"           # none: a key helper
+  run "$REPO/bin/ct-autostart"
+  [ "$(grep -c "claude -p ok \[config=$HOME/dev/.profiles/acme/claude\]" "$CLAUDE_STUB_LOG")" -eq 1 ]
+  [ "$(grep -c 'claude -p ok \[config=~/.claude\]' "$CLAUDE_STUB_LOG")" -eq 1 ]   # agent-four
+  ! grep -q "config=$HOME/dev/.profiles/gw" "$CLAUDE_STUB_LOG"
+  [[ "$output" == *"gw/claude has no claude.ai login"*"skipped"* ]]
+}
+
 @test "summary line reports counts and exit reflects failures" {
   touch "$HOME/.ct-autostart"
   run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
