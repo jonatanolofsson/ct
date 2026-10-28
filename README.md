@@ -28,6 +28,7 @@ Settings are environment variables, never flags. Every argument is forwarded to 
 | `CT_OPENCODE_WEB` | URL printed for the OpenCode web UI; `{port}` is replaced by the server's port |
 | `CT_WORKSPACE_ROOT` | a single workspace root instead of `~/dev` and `~/workspaces` |
 | `CT_PROFILE` | at a workspace's first launch: share the named login profile (see below) instead of its own logins |
+| `CT_BEDROCK_SETTINGS` | for `ct-profile claude <name> bedrock`: the site's Claude settings for its Bedrock backend (a JSON file merged into the profile's) |
 
 ct also *exports* two variables into every agent it starts, so the workspace conventions' "Add a repo"
 recipe runs as written: `CT_WORKSPACE` (the agent's workspace) and `WORKSPACE_ROOT` (the root holding
@@ -43,6 +44,12 @@ application-default credentials belong to that workspace, or, with `CT_PROFILE=<
 `<root>/.profiles/<name>/` that every workspace naming it shares. Never to the machine. Each repo's
 `.envrc` inherits it with `source_up_if_exists`. A blocked `.envrc` makes ct warn and start the agent without
 it, rather than not at all. See the conventions, "Logins belong to a workspace or a profile".
+
+A profile also carries a Claude Code identity: the `.envrc` points `CLAUDE_CONFIG_DIR` at
+`<root>/.profiles/<name>/claude`, so a profile has its own claude.ai login or its own backend, settings and
+conversations, and ct resumes from there. `ct-profile claude <name> [bedrock]` sets one up and `ct-profile move`
+copies a workspace's conversations into it. A workspace named `*-bedrock` should use a bedrock profile; ct warns
+when the name and the profile disagree.
 
 ### One OpenCode server, one terminal per workspace
 

@@ -113,6 +113,10 @@ if [[ -n $ct_profile ]]; then logins="${PWD%/*}/.profiles/$ct_profile"; else log
 export CLOUDSDK_CONFIG="$logins/gcloud"   # gcloud, and its application-default credentials
 # Go programs (OpenTofu's Google provider) ignore CLOUDSDK_CONFIG and look in ~/.config/gcloud.
 export GOOGLE_APPLICATION_CREDENTIALS="$CLOUDSDK_CONFIG/application_default_credentials.json"
+# Claude Code: a profile carries its own Claude config (login or a backend such
+# as a gateway, settings, transcripts, memory). No profile: the machine's
+# ~/.claude, as before.
+if [[ -n $ct_profile ]]; then export CLAUDE_CONFIG_DIR="$logins/claude"; fi
 
 # Tools for the agent outside any clone, if this workspace has a flake of its own.
 if [[ -f flake.nix ]]; then use flake; fi
@@ -172,13 +176,44 @@ if [[ -n $pinned ]]; then display="$CT_NAME"; else display="${workspace##*/}"; f
 base="$(printf '%s' "$display" | tr -c 'A-Za-z0-9_-' '-')"
 name="$agent-$base"
 
-# Where Claude keeps a directory's transcripts: ~/.claude/projects/<key>, where
+# Which Claude config the agent of a workspace uses: its profile's
+# (<root>/.profiles/<name>/claude, which the workspace .envrc exports as
+# CLAUDE_CONFIG_DIR), or the machine's ~/.claude without one. Read from the
+# .envrc's `ct_profile=` line itself, so it is the same answer whether or not
+# this process runs inside that environment.
+claude_dir() { # workspace dir -> config dir
+  local p=""
+  [[ -f "$1/.envrc" ]] && p=$(sed -n 's/^ct_profile=\([a-z0-9-]*\)$/\1/p' "$1/.envrc" | head -1)
+  if [[ -n $p ]]; then printf '%s/.profiles/%s/claude' "${1%/*}" "$p"; else printf '%s/.claude' "$HOME"; fi
+}
+
+# A workspace's name says who pays (the site's conventions): one ending in
+# -bedrock runs Claude on a profile set up for Bedrock (`ct-profile claude
+# <name> bedrock`, which marks its settings ct_profile_kind: bedrock), and no
+# other workspace does. Disagreeing is a warning, not a refusal: the person may
+# be mid-move, and an agent that will not start helps nobody.
+claude_billing_check() {
+  local cfg kind=account
+  ((in_root)) || return 0
+  cfg="$(claude_dir "$agent_ws")/settings.json"
+  if [[ -f $cfg ]] && command -v jq >/dev/null 2>&1; then
+    kind=$(jq -r '.ct_profile_kind // "account"' "$cfg" 2>/dev/null || echo account)
+  fi
+  if [[ ${agent_ws##*/} == *-bedrock && $kind != bedrock ]]; then
+    echo "ct: WARNING: ${agent_ws##*/} is named -bedrock but its Claude ($cfg) is not a bedrock profile — it bills the account it is signed in to" >&2
+  elif [[ ${agent_ws##*/} != *-bedrock && $kind == bedrock ]]; then
+    echo "ct: WARNING: ${agent_ws##*/} runs Claude on a bedrock profile but is not named -bedrock" >&2
+  fi
+  return 0
+}
+
+# Where Claude keeps a directory's transcripts: <config>/projects/<key>, where
 # the key is the absolute path with EVERY character that is not a letter or a
 # digit turned into '-' (so `/a/.claude/b c` is `-a--claude-b-c`). Replacing
 # only '/' — what ct did before 0.5.0 — misses any path with a dot or a space,
 # and then nothing resumes. The keys START WITH A HYPHEN: ls/find/stat parse
 # that as an option, so they are only ever used in quoted paths and globs.
-transcripts() { printf '%s/.claude/projects/%s' "$HOME" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-')"; }
+transcripts() { printf '%s/projects/%s' "$(claude_dir "$agent_ws")" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-')"; }
 
 # glob_any, not `compgen -G`: compgen exists only when bash was built with
 # programmable completion. Fedora 43's bash has none, so there ct_pick_session
@@ -557,6 +592,7 @@ else
   record_add claude
 fi
 ws_envrc_write
+claude_billing_check
 cmd="$(ws_exec_prefix)$cmd"
 tmux new-session -d -s "$name" -c "$workspace" \
   -e "CT_WORKSPACE=$agent_ws" -e "WORKSPACE_ROOT=$agent_root" "$cmd"

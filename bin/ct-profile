@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# ct-profile — set up the Claude Code half of a ct profile.
+#
+#   ct-profile claude <name>           a profile with its own claude.ai login
+#   ct-profile claude <name> bedrock   one that runs Claude on the backend the
+#                                      site defines in $CT_BEDROCK_SETTINGS
+#   ct-profile move <workspace> <name> bring a workspace's conversations along
+#
+# A profile is <root>/.profiles/<name>/ (docs/workspace-conventions.md); a
+# workspace naming it in its .envrc gets CLAUDE_CONFIG_DIR=<profile>/claude.
+# Creating one starts from the machine's ~/.claude/settings.json, so the hooks
+# (ct-scratch-guard), permissions and plansDirectory come along, and links the
+# machine's skills, agents, commands and plugins, so they are kept in one place.
+# It never copies a login: an account profile signs in once (`claude /login`
+# from a workspace that uses it), a bedrock one needs none.
+set -euo pipefail
+
+root="${WORKSPACE_ROOT:-${CT_WORKSPACE_ROOT:-$HOME/dev}}"
+die() { echo "ct-profile: $*" >&2; exit 2; }
+key() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '-'; }
+
+claude_profile() { # name [bedrock]
+  local name="$1" kind="${2:-account}" dir src
+  [[ $name =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "'$name' is not a profile name ([a-z0-9-])"
+  [[ $kind == account || $kind == bedrock ]] || die "unknown kind '$kind' (account or bedrock)"
+  dir="$root/.profiles/$name/claude"
+  if [[ -e $dir/settings.json ]]; then echo "ct-profile: $dir already exists; left as it is" >&2; return 0; fi
+  if [[ $kind == bedrock && ! ( -n ${CT_BEDROCK_SETTINGS:-} && -f ${CT_BEDROCK_SETTINGS:-} ) ]]; then
+    die "a bedrock profile needs CT_BEDROCK_SETTINGS: the site's settings for its backend (none here)"
+  fi
+  (umask 077 && mkdir -p "$dir")
+  src="$HOME/.claude/settings.json"
+  if [[ -f $src ]]; then cp "$src" "$dir/settings.json"; else echo '{}' > "$dir/settings.json"; fi
+  for d in skills agents commands plugins; do
+    [[ -e $HOME/.claude/$d ]] && ln -sfn "$HOME/.claude/$d" "$dir/$d"
+  done
+  if [[ $kind == bedrock ]]; then
+    jq -s '.[0] * .[1] | .ct_profile_kind = "bedrock"' "$dir/settings.json" "$CT_BEDROCK_SETTINGS" > "$dir/settings.json.tmp"
+    mv "$dir/settings.json.tmp" "$dir/settings.json"
+  fi
+  chmod 600 "$dir/settings.json"
+  echo "ct-profile: $dir ready ($kind)" >&2
+}
+
+move() { # workspace name
+  local ws="$1" name="$2" from to
+  [[ -d $ws ]] || die "no workspace $ws"
+  from="$HOME/.claude/projects/$(key "$ws")"
+  to="$root/.profiles/$name/claude/projects/$(key "$ws")"
+  [[ -d "$root/.profiles/$name/claude" ]] || die "no profile $name (ct-profile claude $name first)"
+  [[ -d $from ]] || { echo "ct-profile: nothing to move ($from does not exist)" >&2; return 0; }
+  mkdir -p "$to"
+  # Copy, not move: the conversation stays where it was, too, until the person
+  # is sure (docs/workspace-conventions.md). A resume in the profile carries on
+  # with the whole history, on whatever backend the profile uses.
+  cp -a "$from/." "$to/"
+  echo "ct-profile: copied $(find "$to" -maxdepth 1 -name '*.jsonl' | wc -l) conversation(s) into $name" >&2
+}
+
+case "${1:-}" in
+  claude) shift; [[ $# -ge 1 ]] || die "usage: ct-profile claude <name> [bedrock]"; claude_profile "$@" ;;
+  move)   shift; [[ $# -eq 2 ]] || die "usage: ct-profile move <workspace> <name>"; move "$@" ;;
+  *) die "usage: ct-profile claude <name> [bedrock] | move <workspace> <name>" ;;
+esac

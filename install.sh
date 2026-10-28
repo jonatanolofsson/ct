@@ -11,7 +11,7 @@
 #              without a checkout (curl mode)
 #
 # What it does:
-#   1. installs bin/{ct,ct-autostart,ensure-nix,ct-scratch-guard} into CT_PREFIX
+#   1. installs bin/{ct,ct-autostart,ensure-nix,ct-scratch-guard,ct-profile} into CT_PREFIX
 #   2. writes the generic workspace conventions into CT_HOME/CLAUDE.md inside
 #      a <!-- BEGIN ct-managed --> marker block (hand edits outside survive;
 #      site layers add their own block — see docs/bootstrap-integration.md)
@@ -52,10 +52,10 @@ fi
 
 # --- 1. binaries (replace only on success; old copies survive any failure) --
 mkdir -p "$CT_PREFIX"
-for tool in ct ct-autostart ensure-nix ct-scratch-guard; do
+for tool in ct ct-autostart ensure-nix ct-scratch-guard ct-profile; do
     install -m 0755 "$srcdir/bin/$tool" "$CT_PREFIX/$tool"
 done
-say "installed ct, ct-autostart, ensure-nix, ct-scratch-guard -> $CT_PREFIX"
+say "installed ct, ct-autostart, ensure-nix, ct-scratch-guard, ct-profile -> $CT_PREFIX"
 
 # --- 2. workspace root + conventions block ---------------------------------
 mkdir -p "$CT_HOME"

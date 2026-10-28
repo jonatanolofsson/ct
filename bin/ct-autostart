@@ -140,9 +140,20 @@ state="${CT_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ct}"
 records="$state/agents"
 pins="$state/sessions"
 
+# Which Claude config a workspace's agent uses: its profile's, or ~/.claude.
+# Same rule as ct's claude_dir(); see there.
+claude_dir() { # workspace dir -> config dir
+  local p=""
+  [[ -f "$1/.envrc" ]] && p=$(sed -n 's/^ct_profile=\([a-z0-9-]*\)$/\1/p' "$1/.envrc" | head -1)
+  if [[ -n $p ]]; then printf '%s/.profiles/%s/claude' "${1%/*}" "$p"; else printf '%s/.claude' "$HOME"; fi
+}
+
 # Where Claude keeps a directory's transcripts: every character that is not a
 # letter or a digit becomes '-'. Same rule as ct's transcripts(); see there.
-transcripts() { printf '%s/.claude/projects/%s' "$HOME" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-')"; }
+# The second argument is the workspace whose Claude config holds them.
+transcripts() { # dir [workspace] -> transcript dir
+  printf '%s/projects/%s' "$(claude_dir "${2:-$1}")" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-')"
+}
 
 # A workspace's agents, one line each: "claude" or "opencode" (a pre-0.7.0
 # "opencode <port>" line reads as "opencode"). No record means claude — see the
@@ -252,9 +263,13 @@ screen_problem() { # session display-name -> prints the problem, returns 1 if th
 
 # A fresh session in a directory Claude doesn't trust yet stops at the trust
 # dialog. Say so at start; the next pass's screen check will show it too.
-untrusted() { # workspace dir -> true when ~/.claude.json does not trust it
+untrusted() { # workspace dir -> true when its Claude config does not trust it
+  local cfg
   command -v jq >/dev/null 2>&1 || return 1
-  [[ $(jq -r --arg p "$1" '.projects[$p].hasTrustDialogAccepted // false' "$HOME/.claude.json" 2>/dev/null) != true ]]
+  cfg="$(claude_dir "$1")"
+  # ~/.claude keeps its state beside it, in ~/.claude.json; a CLAUDE_CONFIG_DIR inside it.
+  if [[ $cfg == "$HOME/.claude" ]]; then cfg="$HOME/.claude.json"; else cfg="$cfg/.claude.json"; fi
+  [[ $(jq -r --arg p "$1" '.projects[$p].hasTrustDialogAccepted // false' "$cfg" 2>/dev/null) != true ]]
 }
 
 # opencode's health is not on its screen: its terminal is attached to the one
