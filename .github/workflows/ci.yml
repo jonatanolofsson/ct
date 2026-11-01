@@ -8,20 +8,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: install bats + pinned shellcheck
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq bats
-          # Pin shellcheck so CI is reproducible and matches local `just check`
-          # (distro shellcheck versions differ on which SC notes they emit).
-          SC_VER=v0.10.0
-          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.x86_64.tar.xz" \
-            | tar -xJ
-          sudo install -m 0755 "shellcheck-${SC_VER}/shellcheck" /usr/local/bin/shellcheck
-          shellcheck --version
-      - name: lint
-        run: |
-          bash -n bin/ct bin/ct-autostart bin/ensure-nix install.sh
-          perl -c bin/ct-scratch-guard
-          shellcheck -x bin/ct bin/ct-autostart bin/ensure-nix install.sh
-      - name: test
-        run: bats tests/
+      # ct's tools come from its own flake (flake.nix, flake.lock), here as locally
+      # (`direnv exec . just check`), so lint and tests run the same shellcheck and bats.
+      # Upstream Nix, from the installer action pinned to its v23 release commit, with the
+      # installer binary at a release tag and no diagnostics or summary.
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
+        with:
+          determinate: false
+          diagnostic-endpoint: ""
+          summarize: false
+          source-tag: v3.24.1
+      - name: check
+        run: nix develop --command just check

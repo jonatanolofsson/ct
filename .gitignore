@@ -1,0 +1,4 @@
+# direnv's cache for the flake shell (.envrc), and the workspace credential links every clone gets
+.direnv/
+/.env
+/.kubeconfig

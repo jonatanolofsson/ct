@@ -1,4 +1,4 @@
-# ct — checks mirror .github/workflows/ci.yml
+# ct — `just check` is what CI runs, in this repo's flake (`nix develop --command just check`); locally: `direnv exec . just check`
 
 check: lint test
 

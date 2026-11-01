@@ -495,61 +495,77 @@ envrc_uses() {
     source ./.envrc )
 }
 
-@test "the workspace's tools flake loads from .tools/, never from the workspace root" {
-  # Written that way at the first launch: nothing for the migration to move.
+@test "a workspace's .envrc loads no flake, wherever one sits" {
+  # Written that way at the first launch: nothing for the migration to remove.
   run run_ct "$HOME/dev/agent-alpha"
-  [[ $output != *"tools flake now loads"* ]]
+  [[ $output != *"workspace flake line is gone"* ]]
   local ws="$HOME/dev/agent-alpha"
-  touch "$ws/flake.nix"
+  ! grep -q 'use flake' "$ws/.envrc"
+  mkdir "$ws/.tools"; touch "$ws/flake.nix" "$ws/.tools/flake.nix"
   [[ -z "$(envrc_uses "$ws")" ]]
-  mkdir "$ws/.tools"; touch "$ws/.tools/flake.nix"
-  [[ "$(envrc_uses "$ws")" == "use flake $ws/.tools" ]]
 }
 
-# The .envrc ct wrote before it moved the tools flake, with a line of the
-# workspace's own after it.
-old_envrc() {
+# The two .envrc forms ct wrote before, each with lines of the workspace's own
+# around it.
+old_root_envrc() {
   printf '%s\n' 'ct_profile=' \
     '# Tools for the agent outside any clone, if this workspace has a flake of its own.' \
     'if [[ -f flake.nix ]]; then use flake; fi' \
     'export MINE=1' > "$1/.envrc"
 }
+old_tools_envrc() {
+  printf '%s\n' 'ct_profile=' \
+    '# my own note' \
+    '# Tools for the agent outside any clone, from a flake of the workspace'"'"'s own in' \
+    '# .tools/ — never at the workspace root. The workspace is no git repo, so nix' \
+    '# copies a flake'"'"'s whole folder into its store on every load that finds it' \
+    '# changed; at the root that is every clone and virtualenv, each time.' \
+    'if [[ -f .tools/flake.nix ]]; then use flake "$PWD/.tools"; fi' \
+    'export MINE=1' > "$1/.envrc"
+}
 
-@test "an allowed old .envrc gets ct's tools line moved to .tools/, and keeps every other line" {
-  local ws="$HOME/dev/agent-alpha"
-  old_envrc "$ws"
-  run run_ct "$ws"
-  [[ $status -eq 0 ]]
-  [[ $output == *"tools flake now loads from .tools/"* ]]
-  ! grep -qxF 'if [[ -f flake.nix ]]; then use flake; fi' "$ws/.envrc"
-  ! grep -q 'if this workspace has a flake of its own' "$ws/.envrc"
-  grep -qx 'ct_profile=' "$ws/.envrc"
-  grep -qx 'export MINE=1' "$ws/.envrc"
-  grep -q "direnv allow $ws" "$DIRENV_STUB_LOG"
-  mkdir "$ws/.tools"; touch "$ws/.tools/flake.nix" "$ws/flake.nix"
-  [[ "$(envrc_uses "$ws")" == "use flake $ws/.tools" ]]
-  # A second launch finds nothing to move.
-  run run_ct "$ws"
-  [[ $output != *"tools flake now loads"* ]]
+@test "an allowed old .envrc loses ct's flake line and its comment, and keeps every other line" {
+  local ws="$HOME/dev/agent-alpha" form
+  for form in old_root_envrc old_tools_envrc; do
+    $form "$ws"
+    # A fresh start each time: with its session listed, ct only re-attaches.
+    : > "$DIRENV_STUB_LOG"; : > "$TMUX_STUB_SESSIONS"
+    run run_ct "$ws"
+    [[ $status -eq 0 ]]
+    [[ $output == *"workspace flake line is gone"* ]]
+    ! grep -q 'use flake' "$ws/.envrc"
+    ! grep -q 'Tools for the agent outside any clone' "$ws/.envrc"
+    ! grep -q 'whole folder into its store' "$ws/.envrc"
+    grep -qx 'ct_profile=' "$ws/.envrc"
+    grep -qx 'export MINE=1' "$ws/.envrc"
+    if [[ $form == old_tools_envrc ]]; then grep -qx '# my own note' "$ws/.envrc"; fi
+    grep -q "direnv allow $ws" "$DIRENV_STUB_LOG"
+    [[ -z "$(envrc_uses "$ws")" ]]
+    # A second fresh launch finds nothing to remove.
+    : > "$TMUX_STUB_SESSIONS"
+    run run_ct "$ws"
+    [[ $output != *"workspace flake line is gone"* ]]
+  done
 }
 
 @test "a blocked old .envrc is left as it is, with a note, and never allowed by ct" {
   local ws="$HOME/dev/agent-alpha"
-  old_envrc "$ws"
+  old_tools_envrc "$ws"
   local before; before="$(cat "$ws/.envrc")"
   export DIRENV_STUB_BLOCKED=1
   run run_ct "$ws"
   [[ $status -eq 0 ]]
-  [[ $output == *"still loads a flake at the workspace root"* ]]
+  [[ $output == *"still loads a workspace flake"* ]]
   [[ "$(cat "$ws/.envrc")" == "$before" ]]
   ! grep -q "direnv allow" "$DIRENV_STUB_LOG"
 }
 
-@test "a flake at the workspace root is named as the hazard it is" {
+@test "a workspace flake left behind is named, wherever it sits" {
   local ws="$HOME/dev/agent-alpha"
-  old_envrc "$ws"; touch "$ws/flake.nix"
+  mkdir "$ws/.tools"; touch "$ws/flake.nix" "$ws/.tools/flake.nix"
   run run_ct "$ws"
-  [[ $output == *"flake.nix sits at the workspace root"*"move it and its flake.lock into $ws/.tools/"* ]]
+  [[ $output == *"$ws/flake.nix is a workspace flake, which ct no longer loads"* ]]
+  [[ $output == *"$ws/.tools/flake.nix is a workspace flake, which ct no longer loads"* ]]
 }
 
 # Evaluate a written .envrc the way direnv would, from its own directory, and
