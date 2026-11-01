@@ -118,8 +118,11 @@ export GOOGLE_APPLICATION_CREDENTIALS="$CLOUDSDK_CONFIG/application_default_cred
 # ~/.claude, as before.
 if [[ -n $ct_profile ]]; then export CLAUDE_CONFIG_DIR="$logins/claude"; fi
 
-# Tools for the agent outside any clone, if this workspace has a flake of its own.
-if [[ -f flake.nix ]]; then use flake; fi
+# Tools for the agent outside any clone, from a flake of the workspace's own in
+# .tools/ — never at the workspace root. The workspace is no git repo, so nix
+# copies a flake's whole folder into its store on every load that finds it
+# changed; at the root that is every clone and virtualenv, each time.
+if [[ -f .tools/flake.nix ]]; then use flake "$PWD/.tools"; fi
 
 source_env_if_exists .envrc.local
 EOF
@@ -127,6 +130,53 @@ EOF
   if [[ -n ${CT_PROFILE:-} ]]; then echo "ct: wrote $f — logins: profile $CT_PROFILE" >&2
   else echo "ct: wrote $f — logins: this workspace's own" >&2; fi
   if command -v direnv >/dev/null 2>&1; then direnv allow "$agent_ws" >/dev/null 2>&1 || true; fi
+}
+
+# Whether direnv already allows the workspace's .envrc, asked without loading it.
+ws_envrc_allowed() {
+  local status
+  status="$(cd "$agent_ws" && direnv status --json 2>/dev/null)" || return 1
+  [[ $status =~ \"foundRC\":[[:space:]]*\{[[:space:]]*\"allowed\":[[:space:]]*0,[[:space:]]*\"path\":[[:space:]]*\"([^\"]*)\" ]] \
+    && [[ ${BASH_REMATCH[1]} == "$agent_ws/.envrc" ]]
+}
+
+# The .envrc ct wrote before this release loaded a flake at the workspace root.
+# The workspace is no git repo, so nix copied the whole workspace — every clone
+# and virtualenv — into its store on each load that found anything changed (one
+# evening: 66 copies, a full 99 GB disk). ct rewrites that one line of its own,
+# and its comment, to the .tools/ form, and leaves every other line as it is.
+# Only in an .envrc direnv already allows, so allowing it again approves ct's
+# change and nothing else.
+ws_envrc_migrate() {
+  local f="$agent_ws/.envrc"
+  local old='if [[ -f flake.nix ]]; then use flake; fi'
+  local old_comment="# Tools for the agent outside any clone, if this workspace has a flake of its own."
+  ((in_root)) || return 0
+  [[ -f $f ]] && grep -qxF -- "$old" "$f" || return 0
+  if [[ -f $agent_ws/flake.nix ]]; then
+    echo "ct: WARNING: $agent_ws/flake.nix sits at the workspace root, where nix copies the whole workspace into its store on every change; move it and its flake.lock into $agent_ws/.tools/" >&2
+  fi
+  command -v direnv >/dev/null 2>&1 || return 0
+  if ! ws_envrc_allowed; then
+    echo "ct: $f still loads a flake at the workspace root; ct moves that line to .tools/ only in an .envrc direnv allows (run: direnv allow $agent_ws, then ct again)" >&2
+    return 0
+  fi
+  local tmp
+  tmp="$(mktemp)"
+  awk -v old="$old" -v old_comment="$old_comment" '
+    $0 == old_comment {
+      print "# Tools for the agent outside any clone, from a flake of the workspace'"'"'s own in"
+      print "# .tools/ — never at the workspace root. The workspace is no git repo, so nix"
+      print "# copies a flake'"'"'s whole folder into its store on every load that finds it"
+      print "# changed; at the root that is every clone and virtualenv, each time."
+      next
+    }
+    $0 == old { print "if [[ -f .tools/flake.nix ]]; then use flake \"$PWD/.tools\"; fi"; next }
+    { print }
+  ' "$f" > "$tmp" && cat "$tmp" > "$f"
+  rm -f "$tmp"
+  direnv allow "$agent_ws" >/dev/null 2>&1 || true
+  echo "ct: $f: the workspace's tools flake now loads from .tools/, not the workspace root" >&2
 }
 
 # The prefix that starts a command inside the workspace's environment, or
@@ -592,6 +642,7 @@ else
   record_add claude
 fi
 ws_envrc_write
+ws_envrc_migrate
 claude_billing_check
 cmd="$(ws_exec_prefix)$cmd"
 tmux new-session -d -s "$name" -c "$workspace" \

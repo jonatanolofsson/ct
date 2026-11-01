@@ -3,10 +3,15 @@
 # State (env):
 #   DIRENV_STUB_LOG      file to append argv lines to (default: none)
 #   DIRENV_STUB_BLOCKED  set: `exec` fails as a blocked .envrc does, without
-#                        running the command
+#                        running the command, and `status` reports it blocked
 echo "direnv $*" >> "${DIRENV_STUB_LOG:-/dev/null}"
 case "$1" in
   allow) exit 0 ;;
+  status)
+    # direnv 2.38's shape: the .envrc found from the current directory, 0 = allowed.
+    printf '{\n  "state": {\n    "foundRC": {\n      "allowed": %d,\n      "path": "%s"\n    }\n  }\n}\n' \
+      "$([[ -n "${DIRENV_STUB_BLOCKED:-}" ]] && echo 2 || echo 0)" "$PWD/.envrc"
+    exit 0 ;;
   exec)
     if [[ -n "${DIRENV_STUB_BLOCKED:-}" ]]; then
       echo "direnv: error $2/.envrc is blocked. Run \`direnv allow\` to approve its content" >&2

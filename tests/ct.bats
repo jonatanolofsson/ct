@@ -488,6 +488,70 @@ cmd_words() { # session-name -> sets the array W
   ! grep -q 'direnv exec' "$TMUX_STUB_LOG"
 }
 
+# What a written .envrc asks direnv to `use`, evaluated from its own directory.
+envrc_uses() {
+  ( cd "$1" && use() { echo "use $*"; }; source_env_if_exists() { :; }
+    # shellcheck disable=SC1091
+    source ./.envrc )
+}
+
+@test "the workspace's tools flake loads from .tools/, never from the workspace root" {
+  # Written that way at the first launch: nothing for the migration to move.
+  run run_ct "$HOME/dev/agent-alpha"
+  [[ $output != *"tools flake now loads"* ]]
+  local ws="$HOME/dev/agent-alpha"
+  touch "$ws/flake.nix"
+  [[ -z "$(envrc_uses "$ws")" ]]
+  mkdir "$ws/.tools"; touch "$ws/.tools/flake.nix"
+  [[ "$(envrc_uses "$ws")" == "use flake $ws/.tools" ]]
+}
+
+# The .envrc ct wrote before it moved the tools flake, with a line of the
+# workspace's own after it.
+old_envrc() {
+  printf '%s\n' 'ct_profile=' \
+    '# Tools for the agent outside any clone, if this workspace has a flake of its own.' \
+    'if [[ -f flake.nix ]]; then use flake; fi' \
+    'export MINE=1' > "$1/.envrc"
+}
+
+@test "an allowed old .envrc gets ct's tools line moved to .tools/, and keeps every other line" {
+  local ws="$HOME/dev/agent-alpha"
+  old_envrc "$ws"
+  run run_ct "$ws"
+  [[ $status -eq 0 ]]
+  [[ $output == *"tools flake now loads from .tools/"* ]]
+  ! grep -qxF 'if [[ -f flake.nix ]]; then use flake; fi' "$ws/.envrc"
+  ! grep -q 'if this workspace has a flake of its own' "$ws/.envrc"
+  grep -qx 'ct_profile=' "$ws/.envrc"
+  grep -qx 'export MINE=1' "$ws/.envrc"
+  grep -q "direnv allow $ws" "$DIRENV_STUB_LOG"
+  mkdir "$ws/.tools"; touch "$ws/.tools/flake.nix" "$ws/flake.nix"
+  [[ "$(envrc_uses "$ws")" == "use flake $ws/.tools" ]]
+  # A second launch finds nothing to move.
+  run run_ct "$ws"
+  [[ $output != *"tools flake now loads"* ]]
+}
+
+@test "a blocked old .envrc is left as it is, with a note, and never allowed by ct" {
+  local ws="$HOME/dev/agent-alpha"
+  old_envrc "$ws"
+  local before; before="$(cat "$ws/.envrc")"
+  export DIRENV_STUB_BLOCKED=1
+  run run_ct "$ws"
+  [[ $status -eq 0 ]]
+  [[ $output == *"still loads a flake at the workspace root"* ]]
+  [[ "$(cat "$ws/.envrc")" == "$before" ]]
+  ! grep -q "direnv allow" "$DIRENV_STUB_LOG"
+}
+
+@test "a flake at the workspace root is named as the hazard it is" {
+  local ws="$HOME/dev/agent-alpha"
+  old_envrc "$ws"; touch "$ws/flake.nix"
+  run run_ct "$ws"
+  [[ $output == *"flake.nix sits at the workspace root"*"move it and its flake.lock into $ws/.tools/"* ]]
+}
+
 # Evaluate a written .envrc the way direnv would, from its own directory, and
 # print where it puts gcloud.
 envrc_gcloud() {
