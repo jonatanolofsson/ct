@@ -116,6 +116,12 @@ Rules that keep it working:
   `export GOOGLE_APPLICATION_CREDENTIALS="$CLOUDSDK_CONFIG/application_default_credentials.json"`.
 - **Any other tool that signs in works the same way**: its config-directory variable goes in the workspace
   `.envrc`, under `$logins`, so it follows the profile.
+- **A workspace's own tools come from a flake in `<workspace>/.tools/`, never `<workspace>/flake.nix`.** The
+  workspace is no git repo, so nix copies a flake's whole folder into its store on every load that finds it
+  changed, and every clone's `.envrc` loads the workspace's first. At the root that folder is every clone and
+  virtualenv: one evening of it made 66 copies and filled a 99 GB disk. In `.tools/` it is two files. The
+  `.envrc` ct writes loads `.tools/flake.nix` if it exists; ct moves the older root line there itself, in an
+  `.envrc` direnv allows. A flake in a git repo is not affected: nix takes only the repo's tracked files.
 - **The agent's own environment is fixed when it starts.** After editing the workspace `.envrc`, run
   `direnv allow <workspace>`. Until the agent is restarted (the site section says how), run commands through
   `direnv exec <clone> …` from a clone, which reads the edited file. A blocked `.envrc` makes ct start the agent
