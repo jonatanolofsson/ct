@@ -1,5 +1,5 @@
 {
-  "//": "Starting-point permissions for Claude Code in a ct workspace. The split is read-vs-mutate: reads are allowed, mutations ask; git is allowed whole, and only what destroys work or history asks (a plain or -f force push, a +refspec, deleting a remote ref, reset --hard, discarding changes, clean, forced branch moves, dropping stashes, pruning). Each git rule also covers `git -C <dir>`. Every rule is doubled for `direnv exec .` because nix-flake repos run tools through direnv. `rm` is not here: install.sh registers ct-scratch-guard, a hook that lets rm inside a workspace .scratch/ run and asks for every other rm (an ask rule would override it). Copy to ~/.claude/settings.json and add your own path grants (Edit/Write/Read roots, permissions.additionalDirectories) — deliberately not included here.",
+  "//": "Starting-point permissions for Claude Code in a ct workspace. The split is read-vs-mutate: reads are allowed, mutations ask; git is allowed whole, and only what destroys work or history asks (a plain or -f force push, a +refspec, deleting a remote ref, reset --hard, discarding changes, clean, forced branch moves, dropping stashes, pruning). Each git rule also covers `git -C <dir>`. Every rule is doubled for `direnv exec .` because nix-flake repos run tools through direnv. `rm` is not here (but for a hard deny of `rm -rf /` itself; a `*` matches any characters, so `rm -rf /*` would deny every absolute-path `rm -rf`, the guard's scratch deletions included): install.sh registers ct-scratch-guard, a hook that lets rm inside a workspace .scratch/ run and asks for every other rm (an ask rule would override it). Copy to ~/.claude/settings.json and add your own path grants (Edit/Write/Read roots, permissions.additionalDirectories) — deliberately not included here.",
   "plansDirectory": ".claude/plans",
   "permissions": {
     "allow": [
@@ -38,7 +38,8 @@
       "Bash(systemctl status:*)"
     ],
     "deny": [
-      "Bash(rm -rf /*)"
+      "Bash(rm -rf /)",
+      "Bash(rm -rf / *)"
     ],
     "ask": [
       "Bash(git push*--force)",

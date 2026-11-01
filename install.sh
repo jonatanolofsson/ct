@@ -165,6 +165,30 @@ perl -MJSON::PP -e '
     print STDERR "ct-install: registered ct-scratch-guard in $f (rm inside .scratch/ no longer prompts)\n";
 ' "$settings" "$CT_PREFIX/ct-scratch-guard" "$CT_HOME"
 
+# --- 3e. the root deny stops shadowing the scratch guard ---------------------
+# The template denied `Bash(rm -rf /*)` to stop `rm -rf /`. A `*` in a rule matches
+# any characters, so it denied every `rm -rf /<path>`, scratch deletions the guard
+# allows included, and a deny wins over any hook. Exactly that rule is replaced by
+# the template's root-only denies; rules anyone added themselves are left alone.
+perl -MJSON::PP -e '
+    my ($f, $tmpl) = @ARGV;
+    local $/;
+    open(my $in, "<", $f) or exit 0; my $raw = <$in>; close $in;
+    my $d = eval { JSON::PP->new->relaxed->decode($raw) };
+    exit 0 if !defined $d || ref $d ne "HASH" || ref $d->{permissions} ne "HASH";
+    my $deny = $d->{permissions}{deny};
+    exit 0 unless ref $deny eq "ARRAY" && grep { $_ eq "Bash(rm -rf /*)" } @$deny;
+    open(my $t, "<", $tmpl) or die "read $tmpl: $!\n"; my $td = JSON::PP->new->relaxed->decode(<$t>); close $t;
+    my @keep = grep { $_ ne "Bash(rm -rf /*)" } @$deny;
+    my %have = map { $_ => 1 } @keep;
+    $d->{permissions}{deny} = [ (grep { !$have{$_} } @{ $td->{permissions}{deny} }), @keep ];
+    my $mode = (stat $f)[2] & 07777;
+    open(my $out, ">", "$f.ct-tmp") or die "write $f.ct-tmp: $!\n";
+    print $out JSON::PP->new->pretty->canonical->encode($d); close $out;
+    chmod $mode, "$f.ct-tmp"; rename "$f.ct-tmp", $f or die "rename: $!\n";
+    print STDERR "ct-install: root deny narrowed in $f (scratch rm -rf no longer denied)\n";
+' "$settings" "$srcdir/templates/claude-settings.json"
+
 # --- 3d. git runs unprompted but for what destroys work or history ----------
 # The template used to ask for `git push --force*`, which also caught
 # `--force-with-lease`, a session's normal push of its own rebased PR branch

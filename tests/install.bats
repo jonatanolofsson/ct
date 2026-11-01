@@ -182,7 +182,7 @@ decide() {  # decide <command> : prints ask, allow or none, from the installed s
     local $/; open F, $ARGV[0]; my $d = decode_json(<F>); my $cmd = $ARGV[1];
     my $hit = sub { for (@{ $_[0] || [] }) { next unless /^Bash\((.*)\)$/s;
       my $re = join ".*", map { quotemeta } split /\*/, $1, -1; return 1 if $cmd =~ /^$re$/s } 0 };
-    print $hit->($d->{permissions}{ask}) ? "ask" : $hit->($d->{permissions}{allow}) ? "allow" : "none";
+    print $hit->($d->{permissions}{deny}) ? "deny" : $hit->($d->{permissions}{ask}) ? "ask" : $hit->($d->{permissions}{allow}) ? "allow" : "none";
   ' "$HOME/.claude/settings.json" "$1"
 }
 
@@ -260,6 +260,28 @@ ALLOW
   json '!grep { $_ eq "Bash(git add *)" } @{$d->{permissions}{allow}}'
   json 'grep { $_ eq "Bash(git *)" } @{$d->{permissions}{allow}} and grep { $_ eq "Read" } @{$d->{permissions}{allow}}'
   [ "$(decide "git push --force-with-lease origin feat/a")" = allow ]
+  h1=$(sha256sum < "$HOME/.claude/settings.json")
+  "$REPO/install.sh" 2>/dev/null
+  [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
+}
+
+
+@test "rm -rf of a workspace's scratch is not denied; rm -rf of the root is" {
+  "$REPO/install.sh" 2>/dev/null
+  [ "$(decide "rm -rf $CT_HOME/ws/.scratch/sub")" != deny ]
+  [ "$(decide "rm -rf /tmp/x")" != deny ]
+  [ "$(decide "rm -rf /")" = deny ]
+  [ "$(decide "rm -rf / --no-preserve-root")" = deny ]
+}
+
+@test "an existing settings.json loses the template's broad rm deny and keeps its own denies" {
+  mkdir -p "$HOME/.claude"
+  printf '%s\n' '{"permissions": {"deny": ["Bash(rm -rf /*)", "Read(**/*.pem)"]}}' > "$HOME/.claude/settings.json"
+  "$REPO/install.sh" 2>/dev/null
+  json '!grep { $_ eq "Bash(rm -rf /*)" } @{$d->{permissions}{deny}}'
+  json 'grep { $_ eq "Read(**/*.pem)" } @{$d->{permissions}{deny}}'
+  [ "$(decide "rm -rf $CT_HOME/ws/.scratch/sub")" != deny ]
+  [ "$(decide "rm -rf /")" = deny ]
   h1=$(sha256sum < "$HOME/.claude/settings.json")
   "$REPO/install.sh" 2>/dev/null
   [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
