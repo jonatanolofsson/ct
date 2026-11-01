@@ -218,6 +218,12 @@ git branch -M feat/a main
 git rm -f file.py
 git rm -rf old
 git reset --merge HEAD~1
+git fetch origin +main:main
+git fetch -f origin feat/a:feat/a
+git worktree add -B main ../wt origin/feat/a
+git tag -f v1 HEAD~3
+git update-ref refs/heads/main abc123
+git rm -fr old
 git checkout .
 git checkout -f main
 git switch --discard-changes main
@@ -292,9 +298,27 @@ ALLOW
   json '!grep { / :\*\)$/ } @{$d->{permissions}{ask}}'
   json '4 == grep { / :\*\*\)$/ } @{$d->{permissions}{ask}}'
   [ "$(decide "git checkout -B main origin/feat/a")" = ask ]   # forms added since ct #11 come along
+  [ "$(decide "git tag -f v1 HEAD~3")" = ask ]
   [ "$(decide "git push origin :feat/a")" = ask ]
   [ "$(decide "direnv exec . git -C /w/repo push origin :feat/a")" = ask ]
   [ "$(decide "git push origin feat/a")" = allow ]
+  h1=$(sha256sum < "$HOME/.claude/settings.json")
+  "$REPO/install.sh" 2>/dev/null
+  [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
+}
+
+@test "settings from ct #13 get the forms added since" {
+  mkdir -p "$HOME/.claude"
+  # ct #13's template: today's without the forms added since, and update-ref asked only with -d
+  perl -ne 'next if /git (-C \* )?(fetch\*|worktree add\* -B|tag\* -f|tag\*--force)/; s/update-ref\*\)/update-ref* -d*)/; print' \
+    "$REPO/templates/claude-settings.json" > "$HOME/.claude/settings.json"
+  [ "$(decide "git tag -f v1 HEAD~3")" = allow ]
+  "$REPO/install.sh" 2>/dev/null
+  [ "$(decide "git tag -f v1 HEAD~3")" = ask ]
+  [ "$(decide "direnv exec . git -C /w/repo fetch origin +main:main")" = ask ]
+  [ "$(decide "git update-ref refs/heads/main abc123")" = ask ]
+  json '!grep { /update-ref\* -d\*\)$/ } @{$d->{permissions}{ask}}'
+  [ "$(decide "git push --force-with-lease --force-if-includes origin feat/a")" = allow ]
   h1=$(sha256sum < "$HOME/.claude/settings.json")
   "$REPO/install.sh" 2>/dev/null
   [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]

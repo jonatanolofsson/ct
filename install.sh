@@ -208,7 +208,10 @@ perl -MJSON::PP -e '
         ("push --force*", "reset --hard*", "checkout -- *", "clean*", "branch -D*")),
         # The colon-refspec rule as it was first written: a rule ending in `:*` is Claude
         # Code"s trailing wildcard, the same as ` *`, so it never matched a colon.
-        map { "Bash(${_}push* :*)" } ("git ", "git -C * ", "direnv exec*git ", "direnv exec*git -C * "));
+        map { ("Bash(${_}push* :*)", "Bash(${_}update-ref* -d*)") }
+            ("git ", "git -C * ", "direnv exec*git ", "direnv exec*git -C * "));
+    # ct #13 asked for `update-ref -d` alone; the template now asks for every update-ref, so
+    # that rule marks a file seeded before the forced fetch, tag and worktree forms were added.
     my %new = map { $_ => 1 } grep { /\bgit / } map { @{ $td->{permissions}{$_} || [] } } "ask", "allow";
     my %old = map { $_ => 1 } grep { !$new{$_} } @old, "Bash(git add *)";
     # Only a file the template seeded (one holding its old git rules) is changed; a file
