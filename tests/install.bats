@@ -99,7 +99,9 @@ guard_cmd() { printf "'%s' '%s'" "$CT_PREFIX/ct-scratch-guard" "$CT_HOME"; }
   want=$(guard_cmd)
   json 'grep { $_->{command} eq "'"$want"'" } map { @{$_->{hooks}} } @{$d->{hooks}{PreToolUse}}'
   json '!grep { /\brm \*/ } @{$d->{permissions}{ask}}'
-  json 'grep { $_ eq "Bash(git push --force*)" } @{$d->{permissions}{ask}}'
+  json 'grep { $_ eq "Bash(git push*--force *)" } @{$d->{permissions}{ask}}'
+  json '!grep { $_ eq "Bash(git push --force*)" } @{$d->{permissions}{ask}}'
+  json 'grep { $_ eq "Bash(git *)" } @{$d->{permissions}{allow}}'
 }
 
 @test "an existing settings.json loses exactly the template's rm rules and keeps its own" {
@@ -168,4 +170,97 @@ guard_cmd() { printf "'%s' '%s'" "$CT_PREFIX/ct-scratch-guard" "$CT_HOME"; }
   jq -e '.plansDirectory == "mine"' "$CT_HOME/.profiles/gw/claude/settings.json"   # a choice is kept
   "$REPO/install.sh" 2>/dev/null                                                  # idempotent
   jq -e '[.hooks.PreToolUse[].hooks[].command | select(contains("ct-scratch-guard"))] | length == 1' "$CT_HOME/.profiles/acme/claude/settings.json"
+}
+
+
+# --- 3d: git is allowed whole; only what destroys work or history asks -------
+
+# Claude Code's Bash rule: the command must match the whole pattern, `*` any run of characters;
+# deny wins over ask, ask over allow.
+decide() {  # decide <command> : prints ask, allow or none, from the installed settings
+  perl -MJSON::PP -e '
+    local $/; open F, $ARGV[0]; my $d = decode_json(<F>); my $cmd = $ARGV[1];
+    my $hit = sub { for (@{ $_[0] || [] }) { next unless /^Bash\((.*)\)$/s;
+      my $re = join ".*", map { quotemeta } split /\*/, $1, -1; return 1 if $cmd =~ /^$re$/s } 0 };
+    print $hit->($d->{permissions}{ask}) ? "ask" : $hit->($d->{permissions}{allow}) ? "allow" : "none";
+  ' "$HOME/.claude/settings.json" "$1"
+}
+
+@test "destructive git asks, in every form, and the rest of git runs unprompted" {
+  "$REPO/install.sh" 2>/dev/null
+  while IFS= read -r cmd; do
+    [ "$(decide "$cmd")" = ask ] || { echo "should ask: $cmd"; return 1; }
+  done <<'ASK'
+git push --force origin feat/a
+git push origin feat/a --force
+git push -f origin feat/a
+git push origin feat/a -f
+git push origin +main
+git push origin --delete feat/a
+git push -d origin feat/a
+git push origin :feat/a
+git push --mirror backup
+git push --prune origin
+git -C /w/repo push --force origin feat/a
+direnv exec . git push --force origin feat/a
+git reset --hard HEAD~1
+git -C /w/repo reset --hard origin/main
+git checkout -- file.py
+git checkout .
+git checkout -f main
+git switch --discard-changes main
+git restore file.py
+git clean -fdx
+git branch -D feat/a
+git branch -f main HEAD~1
+git stash drop
+git stash clear
+git worktree remove --force ../wt
+git tag -d v1
+git reflog expire --expire=now --all
+git gc --prune=now
+git filter-branch --tree-filter x HEAD
+ASK
+  while IFS= read -r cmd; do
+    [ "$(decide "$cmd")" = allow ] || { echo "should run unprompted: $cmd ($(decide "$cmd"))"; return 1; }
+  done <<'ALLOW'
+git push --force-with-lease origin feat/a
+git push --force-with-lease=feat/a:abc123 origin feat/a
+direnv exec . git push --force-with-lease origin feat/a
+git -C /w/repo push --force-with-lease origin feat/a
+git push -q -u origin feat/a
+git commit -m 'x'
+git commit -q --amend --no-edit
+git commit -m 'docs: say when to push --force-with-lease'
+git fetch -q origin
+git pull --rebase
+git rebase origin/main
+git reset --soft HEAD~1
+git switch -q -c feat/a origin/main
+git worktree add ../wt -b feat/a origin/main
+git stash push -u -m tag
+git branch -m old new
+git log --oneline -3
+git -C /w/repo status --short
+direnv exec . git status
+ALLOW
+}
+
+@test "an existing settings.json has exactly the template's old git rules replaced, its own kept" {
+  mkdir -p "$HOME/.claude"
+  printf '%s\n' '{"permissions": {
+      "ask": ["Bash(git push --force*)", "Bash(direnv exec*git push --force*)", "Bash(git clean*)", "Bash(git rebase -i*)", "Bash(kill*)"],
+      "allow": ["Bash(git add *)", "Read"]}}' > "$HOME/.claude/settings.json"
+  "$REPO/install.sh" 2>/dev/null
+  json '!grep { $_ eq "Bash(git push --force*)" || $_ eq "Bash(direnv exec*git push --force*)" } @{$d->{permissions}{ask}}'
+  json 'grep { $_ eq "Bash(git rebase -i*)" } @{$d->{permissions}{ask}}'
+  json 'grep { $_ eq "Bash(kill*)" } @{$d->{permissions}{ask}}'
+  json '1 == grep { $_ eq "Bash(git clean*)" } @{$d->{permissions}{ask}}'
+  json 'grep { $_ eq "Bash(git push*--force *)" } @{$d->{permissions}{ask}}'
+  json '!grep { $_ eq "Bash(git add *)" } @{$d->{permissions}{allow}}'
+  json 'grep { $_ eq "Bash(git *)" } @{$d->{permissions}{allow}} and grep { $_ eq "Read" } @{$d->{permissions}{allow}}'
+  [ "$(decide "git push --force-with-lease origin feat/a")" = allow ]
+  h1=$(sha256sum < "$HOME/.claude/settings.json")
+  "$REPO/install.sh" 2>/dev/null
+  [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
 }
