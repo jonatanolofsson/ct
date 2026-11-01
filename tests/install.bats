@@ -180,8 +180,10 @@ guard_cmd() { printf "'%s' '%s'" "$CT_PREFIX/ct-scratch-guard" "$CT_HOME"; }
 decide() {  # decide <command> : prints ask, allow or none, from the installed settings
   perl -MJSON::PP -e '
     local $/; open F, $ARGV[0]; my $d = decode_json(<F>); my $cmd = $ARGV[1];
-    my $hit = sub { for (@{ $_[0] || [] }) { next unless /^Bash\((.*)\)$/s;
-      my $re = join ".*", map { quotemeta } split /\*/, $1, -1; return 1 if $cmd =~ /^$re$/s } 0 };
+    my $hit = sub { for (@{ $_[0] || [] }) { next unless /^Bash\((.*)\)$/s; my $p = $1;
+      $p =~ s/:\*$/ */;   # `:*` is recognised only at the end, and means ` *`
+      return 1 if $p =~ / \*$/ && ($p =~ tr/*//) == 1 && $cmd eq substr($p, 0, -2);   # `ls *` matches `ls`
+      my $re = join ".*", map { quotemeta } split /\*/, $p, -1; return 1 if $cmd =~ /^$re$/s } 0 };
     print $hit->($d->{permissions}{deny}) ? "deny" : $hit->($d->{permissions}{ask}) ? "ask" : $hit->($d->{permissions}{allow}) ? "allow" : "none";
   ' "$HOME/.claude/settings.json" "$1"
 }
@@ -199,6 +201,8 @@ git push origin +main
 git push origin --delete feat/a
 git push -d origin feat/a
 git push origin :feat/a
+git -C /w/repo push origin :feat/a
+direnv exec . git push origin :feat/a
 git push --mirror backup
 git push --prune origin
 git -C /w/repo push --force origin feat/a
@@ -229,6 +233,8 @@ git push --force-with-lease=feat/a:abc123 origin feat/a
 direnv exec . git push --force-with-lease origin feat/a
 git -C /w/repo push --force-with-lease origin feat/a
 git push -q -u origin feat/a
+git push origin feat/a
+git push origin main:feat/a
 git commit -m 'x'
 git commit -q --amend --no-edit
 git commit -m 'docs: say when to push --force-with-lease'
@@ -265,6 +271,21 @@ ALLOW
   [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
 }
 
+
+@test "settings from ct #11 get a colon-refspec rule that matches a colon" {
+  mkdir -p "$HOME/.claude"
+  perl -pe 's/push\* :\*\*\)/push* :*)/' "$REPO/templates/claude-settings.json" > "$HOME/.claude/settings.json"
+  [ "$(decide "git push origin :feat/a")" = allow ]   # `:*` ends the rule as a wildcard
+  "$REPO/install.sh" 2>/dev/null
+  json '!grep { / :\*\)$/ } @{$d->{permissions}{ask}}'
+  json '4 == grep { / :\*\*\)$/ } @{$d->{permissions}{ask}}'
+  [ "$(decide "git push origin :feat/a")" = ask ]
+  [ "$(decide "direnv exec . git -C /w/repo push origin :feat/a")" = ask ]
+  [ "$(decide "git push origin feat/a")" = allow ]
+  h1=$(sha256sum < "$HOME/.claude/settings.json")
+  "$REPO/install.sh" 2>/dev/null
+  [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
+}
 
 @test "rm -rf of a workspace's scratch is not denied; rm -rf of the root is" {
   "$REPO/install.sh" 2>/dev/null
