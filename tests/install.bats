@@ -230,6 +230,7 @@ ASK
   done <<'ALLOW'
 git push --force-with-lease origin feat/a
 git push --force-with-lease=feat/a:abc123 origin feat/a
+git push --force-with-lease --force-if-includes origin feat/a
 direnv exec . git push --force-with-lease origin feat/a
 git -C /w/repo push --force-with-lease origin feat/a
 git push -q -u origin feat/a
