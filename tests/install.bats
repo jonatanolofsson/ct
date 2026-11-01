@@ -210,6 +210,14 @@ direnv exec . git push --force origin feat/a
 git reset --hard HEAD~1
 git -C /w/repo reset --hard origin/main
 git checkout -- file.py
+git checkout HEAD -- file.py
+git checkout origin/main -- .
+git checkout -B main origin/feat/a
+git switch -C main origin/feat/a
+git branch -M feat/a main
+git rm -f file.py
+git rm -rf old
+git reset --merge HEAD~1
 git checkout .
 git checkout -f main
 git switch --discard-changes main
@@ -243,6 +251,9 @@ git fetch -q origin
 git pull --rebase
 git rebase origin/main
 git reset --soft HEAD~1
+git reset --keep HEAD~1
+git rm --cached file.py
+git rebase -i origin/main
 git switch -q -c feat/a origin/main
 git worktree add ../wt -b feat/a origin/main
 git stash push -u -m tag
@@ -280,6 +291,7 @@ ALLOW
   "$REPO/install.sh" 2>/dev/null
   json '!grep { / :\*\)$/ } @{$d->{permissions}{ask}}'
   json '4 == grep { / :\*\*\)$/ } @{$d->{permissions}{ask}}'
+  [ "$(decide "git checkout -B main origin/feat/a")" = ask ]   # forms added since ct #11 come along
   [ "$(decide "git push origin :feat/a")" = ask ]
   [ "$(decide "direnv exec . git -C /w/repo push origin :feat/a")" = ask ]
   [ "$(decide "git push origin feat/a")" = allow ]
