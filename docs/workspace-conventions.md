@@ -199,9 +199,10 @@ you work. Therefore, in every clone you touch:
   landed work you don't have — rebase onto it, re-run the repo's checks, push. Never `--force` a shared branch:
   `main`, or any branch another session pushes to.
 - **Your own PR branch, which only you push to, you may rewrite.** After rebasing it onto `main`, push it with
-  `git push --force-with-lease` (never plain `--force`): it still refuses if anyone else pushed since. A repo
-  whose merge gate wants a branch current with `main` depends on this; the alternative, a new branch and PR for
-  every rebase, throws the PR's review history away.
+  `git push --force-with-lease --force-if-includes` (never plain `--force`). The lease refuses if the branch moved
+  since your last fetch; `--force-if-includes` refuses if that fetch brought commits your branch never held, which
+  the lease alone would overwrite. A repo whose merge gate wants a branch current with `main` depends on this; the
+  alternative, a new branch and PR for every rebase, throws the PR's review history away.
 - **Update submodules after every pull / rebase / checkout**: `git submodule update --init --recursive`.
   Git does *not* move submodules for you. After a pull your submodule working tree still points at the OLD
   commit, so the next `git add -A` records that stale pointer and silently reverts whoever bumped it. This is

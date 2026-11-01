@@ -204,8 +204,11 @@ perl -MJSON::PP -e '
     my $d = eval { JSON::PP->new->relaxed->decode($raw) };
     exit 0 if !defined $d || ref $d ne "HASH";
     open(my $t, "<", $tmpl) or die "read $tmpl: $!\n"; my $td = JSON::PP->new->relaxed->decode(<$t>); close $t;
-    my @old = map { ("Bash(git $_)", "Bash(direnv exec*git $_)") }
-        ("push --force*", "reset --hard*", "checkout -- *", "clean*", "branch -D*");
+    my @old = ((map { ("Bash(git $_)", "Bash(direnv exec*git $_)") }
+        ("push --force*", "reset --hard*", "checkout -- *", "clean*", "branch -D*")),
+        # The colon-refspec rule as it was first written: a rule ending in `:*` is Claude
+        # Code"s trailing wildcard, the same as ` *`, so it never matched a colon.
+        map { "Bash(${_}push* :*)" } ("git ", "git -C * ", "direnv exec*git ", "direnv exec*git -C * "));
     my %new = map { $_ => 1 } grep { /\bgit / } map { @{ $td->{permissions}{$_} || [] } } "ask", "allow";
     my %old = map { $_ => 1 } grep { !$new{$_} } @old, "Bash(git add *)";
     # Only a file the template seeded (one holding its old git rules) is changed; a file
