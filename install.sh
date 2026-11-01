@@ -164,6 +164,47 @@ perl -MJSON::PP -e '
     chmod $mode, "$f.ct-tmp"; rename "$f.ct-tmp", $f or die "rename: $!\n";
     print STDERR "ct-install: registered ct-scratch-guard in $f (rm inside .scratch/ no longer prompts)\n";
 ' "$settings" "$CT_PREFIX/ct-scratch-guard" "$CT_HOME"
+
+# --- 3d. git runs unprompted but for what destroys work or history ----------
+# The template used to ask for `git push --force*`, which also caught
+# `--force-with-lease`, a session's normal push of its own rebased PR branch
+# (docs/workspace-conventions.md), and allowed only `git add`. Now git is
+# allowed whole and only destructive forms ask (the template lists them; an
+# ask rule wins over an allow). Only a file holding the template's old git
+# rules is changed: exactly those are replaced, and rules anyone added
+# themselves are left alone.
+perl -MJSON::PP -e '
+    my ($f, $tmpl) = @ARGV;
+    local $/;
+    open(my $in, "<", $f) or exit 0; my $raw = <$in>; close $in;
+    my $d = eval { JSON::PP->new->relaxed->decode($raw) };
+    exit 0 if !defined $d || ref $d ne "HASH";
+    open(my $t, "<", $tmpl) or die "read $tmpl: $!\n"; my $td = JSON::PP->new->relaxed->decode(<$t>); close $t;
+    my @old = map { ("Bash(git $_)", "Bash(direnv exec*git $_)") }
+        ("push --force*", "reset --hard*", "checkout -- *", "clean*", "branch -D*");
+    my %new = map { $_ => 1 } grep { /\bgit / } map { @{ $td->{permissions}{$_} || [] } } "ask", "allow";
+    my %old = map { $_ => 1 } grep { !$new{$_} } @old, "Bash(git add *)";
+    # Only a file the template seeded (one holding its old git rules) is changed; a file
+    # without them keeps the git rules its owner chose, or none.
+    exit 0 unless ref $d->{permissions} eq "HASH"
+        && grep { $old{$_} } map { @{ ref $_ eq "ARRAY" ? $_ : [] } } @{ $d->{permissions} }{ "ask", "allow" };
+    my $changed = 0;
+    for my $kind ("ask", "allow") {
+        my $list = ref $d->{permissions}{$kind} eq "ARRAY" ? $d->{permissions}{$kind} : [];
+        my @keep = grep { !$old{$_} } @$list;
+        $changed = 1 if @keep != @$list;
+        my %have = map { $_ => 1 } @keep;
+        my @add = grep { !$have{$_} } grep { /\bgit / } @{ $td->{permissions}{$kind} };
+        $changed = 1 if @add;
+        $d->{permissions}{$kind} = [@add, @keep];
+    }
+    exit 0 unless $changed;
+    my $mode = (stat $f)[2] & 07777;
+    open(my $out, ">", "$f.ct-tmp") or die "write $f.ct-tmp: $!\n";
+    print $out JSON::PP->new->pretty->canonical->encode($d); close $out;
+    chmod $mode, "$f.ct-tmp"; rename "$f.ct-tmp", $f or die "rename: $!\n";
+    print STDERR "ct-install: git rules updated in $f (only destructive git asks)\n";
+' "$settings" "$srcdir/templates/claude-settings.json"
 done
 
 # --- 4. version stamp -------------------------------------------------------
