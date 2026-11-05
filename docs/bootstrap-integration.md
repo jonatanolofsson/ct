@@ -77,6 +77,11 @@ from a repository's `.claude/settings.json`:
 
 - Keep `"$defaults"` first in every list you write. A list without it replaces
   Claude Code's own entries, the block rules included.
+- Leave `autoMode.classifyAllShell` on (ct sets it where the key is absent). It
+  sends every shell command to the classifier while auto mode is active, so an
+  allow rule someone added with "don't ask again" (`Bash(direnv exec *)`) cannot
+  pass a command the classifier never saw. Your `allow` entries above are what
+  spare routine work a refusal, not allow rules.
 - `environment` states facts; `allow` states what is routine at your site. Both
   are read by a model, so write whole sentences and say what an entry does not
   cover.

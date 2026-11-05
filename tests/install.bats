@@ -243,12 +243,23 @@ ALLOW
 }
 
 @test "the retired list holds every rule a template shipped, and the template none of them" {
+  list="$REPO/templates/retired-ask-rules.txt"
   # the released template's rules are all in the list
   jq -r '.[]' <<<"$released_ask" | while IFS= read -r rule; do
-    grep -qxF -- "$rule" "$REPO/templates/retired-ask-rules.txt" || { echo "not retired: $rule"; exit 1; }
+    grep -qxF -- "$rule" "$list" || { echo "not retired: $rule"; exit 1; }
   done
-  # every line is one Bash rule, and the template asks nothing
-  ! grep -v '^#' "$REPO/templates/retired-ask-rules.txt" | grep -qvE '^Bash\(.+\)$'
+  # so are rules only the template of ct #11 to #14 held; the fixture below is built from the
+  # list itself, so without these a list that had lost them would still pass every test
+  for rule in 'Bash(git push*--force)' 'Bash(git push* :**)' 'Bash(git restore *)' 'Bash(git update-ref*)' \
+              'Bash(git -C * tag* -f*)' 'Bash(direnv exec*git -C * worktree add* -B*)' 'Bash(direnv exec*git fetch*+*)'; do
+    grep -qxF -- "$rule" "$list" || { echo "not retired: $rule"; return 1; }
+  done
+  # every line is one Bash rule
+  [ "$(grep -v '^#' "$list" | grep -cvE '^Bash\(.+\)$')" -eq 0 ]
+  # and the list is the one this test was written against: "nothing is ever removed" from it, and
+  # a rule appended to it is a change someone makes here too
+  [ "$(grep -vc '^#' "$list")" -eq 252 ]
+  [ "$(grep -v '^#' "$list" | sha256sum | cut -c1-64)" = "f3128a18ac64878cb60d25641020e0b09f30e76746a23290f79d6a0820d2e7f8" ]
   jq -e '.permissions | has("ask") | not' "$REPO/templates/claude-settings.json"
 }
 
@@ -264,6 +275,7 @@ ALLOW
   run "$REPO/install.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"retired 42 ask rule(s) of the template"* ]]
+  [[ "$output" != *"kept "* ]]
   json 'join(",", @{$d->{permissions}{ask}}) eq "Bash(terraform apply*),Bash(git rebase -i*)"'
   json 'join(",", @{$d->{permissions}{allow}}) eq "Bash(git add *),Read,Bash(git commit -m \x27 *)"'
   json '$d->{model} eq "x" && $d->{permissions}{defaultMode} eq "auto"'
@@ -282,6 +294,39 @@ ALLOW
   jq -n --argjson ask "$released_ask" '{permissions: {ask: $ask}}' > "$HOME/.claude/settings.json"
   "$REPO/install.sh" 2>/dev/null
   json '!exists $d->{permissions}{ask}'
+  # and when the two rm rules were all it held (they go in an earlier step)
+  echo '{"permissions":{"ask":["Bash(rm *)","Bash(direnv exec*rm *)"]}}' > "$HOME/.claude/settings.json"
+  "$REPO/install.sh" 2>/dev/null
+  json '!exists $d->{permissions}{ask}'
+}
+
+# The first version removed the listed rules on every run. An owner who put one back had it
+# removed again at the next boot, under a message saying "rules you added are kept".
+@test "the template's rules are retired once: a rule its owner puts back afterwards stays" {
+  mkdir -p "$HOME/.claude"
+  jq -n --argjson ask "$released_ask" '{permissions: {ask: $ask, allow: ["Bash(helm template:*)"]}}' > "$HOME/.claude/settings.json"
+  "$REPO/install.sh" 2>/dev/null
+  json '!exists $d->{permissions}{ask}'
+  grep -qxF "retire-shipped-rules-1" "$HOME/.claude/.ct-migrations"
+  # the owner decides they want two of them after all
+  jq '.permissions.ask = ["Bash(kubectl delete*)"] | .permissions.allow = ["Bash(helm template:*)"]' "$HOME/.claude/settings.json" > "$BATS_TEST_TMPDIR/s" && cp "$BATS_TEST_TMPDIR/s" "$HOME/.claude/settings.json"
+  run "$REPO/install.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"retired"* ]]
+  json 'join(",", @{$d->{permissions}{ask}}) eq "Bash(kubectl delete*)"'
+  json 'join(",", @{$d->{permissions}{allow}}) eq "Bash(helm template:*)"'
+  [ "$(grep -c . "$HOME/.claude/.ct-migrations")" -eq 1 ]
+}
+
+@test "a settings file that could not be read is retried: nothing is recorded until it runs" {
+  mkdir -p "$HOME/.claude"
+  printf 'not json\n' > "$HOME/.claude/settings.json"
+  "$REPO/install.sh" 2>/dev/null
+  [ ! -e "$HOME/.claude/.ct-migrations" ]
+  jq -n --argjson ask "$released_ask" '{permissions: {ask: $ask}}' > "$HOME/.claude/settings.json"
+  run "$REPO/install.sh"
+  [[ "$output" == *"retired 42 ask rule(s)"* ]]
+  grep -qxF "retire-shipped-rules-1" "$HOME/.claude/.ct-migrations"
 }
 
 @test "settings seeded from ct #11 to #14 lose the git ask rules and the allow of git whole" {
@@ -291,7 +336,10 @@ ALLOW
       allow: ["Bash(git *)", "Bash(direnv exec*git *)", "WebFetch", "Bash(kubectl get:*)"]}}' > "$HOME/.claude/settings.json"
   [ "$(decide "git push --force origin main")" = ask ]
   [ "$(decide "git push origin main")" = allow ]
-  "$REPO/install.sh" 2>/dev/null
+  run "$REPO/install.sh"
+  [[ "$output" == *"retired 250 ask rule(s)"* ]]      # the two rm rules of the 252 went a step earlier
+  [[ "$output" == *"allow of git whole, which the template shipped, replaced by git add"* ]]
+  [[ "$output" != *"kept "* ]]
   json 'join(",", @{$d->{permissions}{ask}}) eq "Bash(terraform apply*)"'
   json 'join(",", @{$d->{permissions}{allow}}) eq "Bash(git add *),WebFetch,Bash(kubectl get:*)"'
   # Without its ask rules, an allow of git whole would have let this through unseen.
@@ -302,11 +350,41 @@ ALLOW
   [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
 }
 
-@test "an allow of git whole that its owner wrote is kept" {
+# Retiring an ask rule must not turn "ask" into "allow". With the owner's own `Bash(git *)` or
+# `Bash(direnv exec *)` in the same file, the ask rule was what stood between that rule and a
+# force push; the first version retired it all the same (review, before release).
+@test "an ask rule that stands guard over an allow rule of the owner's is kept, and the owner is told" {
   mkdir -p "$HOME/.claude"
-  jq -n --argjson ask "$released_ask" '{permissions: {ask: $ask, allow: ["Bash(git *)", "Read"]}}' > "$HOME/.claude/settings.json"
-  "$REPO/install.sh" 2>/dev/null
-  json 'join(",", @{$d->{permissions}{allow}}) eq "Bash(git *),Read"'
+  jq -n --argjson ask "$released_ask" '{permissions: {ask: $ask, allow: ["Bash(git *)", "Bash(direnv exec *)", "Read", "Bash(kubectl get:*)"]}}' > "$HOME/.claude/settings.json"
+  [ "$(decide "git push --force origin main")" = ask ]
+  [ "$(decide "direnv exec . kubectl delete pod x")" = ask ]
+  run "$REPO/install.sh"
+  [ "$status" -eq 0 ]
+  # 5 git rules under `git *`, and the 17 written behind `direnv exec` under `direnv exec *`
+  [[ "$output" == *"kept 22 ask rule(s) of the template"* ]]
+  [[ "$output" == *"Bash(direnv exec *), Bash(git *)"* ]]
+  [[ "$output" == *"retired 20 ask rule(s) of the template"* ]]
+  json '22 == @{$d->{permissions}{ask}}'
+  json 'join(",", @{$d->{permissions}{allow}}) eq "Bash(git *),Bash(direnv exec *),Read,Bash(kubectl get:*)"'
+  [ "$(decide "git push --force origin main")" = ask ]              # as before the install
+  [ "$(decide "git reset --hard HEAD~3")" = ask ]
+  [ "$(decide "direnv exec . kubectl delete pod x")" = ask ]
+  [ "$(decide "direnv exec . helm uninstall app")" = ask ]
+  [ "$(decide "kubectl delete pod x")" = none ]                     # no allow rule of theirs covers it
+  [ "$(decide "kill 1234")" = none ]
+  h1=$(sha256sum < "$HOME/.claude/settings.json")
+  run "$REPO/install.sh"
+  [[ "$output" != *"retired"* && "$output" != *"kept "* ]]
+  [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
+}
+
+@test "a narrow allow rule of the owner's keeps no ask rule" {
+  mkdir -p "$HOME/.claude"
+  jq -n --argjson ask "$released_ask" '{permissions: {ask: $ask, allow: ["Bash(git add *)", "Bash(git commit -m *)", "Bash(kubectl get:*)", "Bash(kill -0 *)"]}}' > "$HOME/.claude/settings.json"
+  run "$REPO/install.sh"
+  [[ "$output" == *"retired 42 ask rule(s)"* ]]
+  [[ "$output" != *"kept "* ]]
+  json '!exists $d->{permissions}{ask}'
 }
 
 @test "three reads that can run a program or print credentials leave the allow list, and say so" {
@@ -331,11 +409,13 @@ ALLOW
   [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
 }
 
-@test "every profile's settings lose the template's ask rules too" {
+@test "every profile's settings lose the template's ask rules too, each recorded beside its own file" {
   mkdir -p "$CT_HOME/.profiles/acme/claude"
   jq -n --argjson ask "$released_ask" '{permissions: {ask: ($ask + ["Bash(mine *)"])}}' > "$CT_HOME/.profiles/acme/claude/settings.json"
   "$REPO/install.sh" 2>/dev/null
   jq -e '.permissions.ask == ["Bash(mine *)"]' "$CT_HOME/.profiles/acme/claude/settings.json"
+  grep -qxF "retire-shipped-rules-1" "$CT_HOME/.profiles/acme/claude/.ct-migrations"
+  grep -qxF "retire-shipped-rules-1" "$HOME/.claude/.ct-migrations"
 }
 
 @test "rm -rf of a workspace's scratch is not denied; rm -rf of the root is" {
@@ -359,8 +439,31 @@ ALLOW
   [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
 }
 
+# Text that is not ASCII came back wrong from a rewrite: a "å" as a lone byte that is not
+# UTF-8, raw UTF-8 beside a "\u" escape doubly encoded. The site layer writes prose into this file.
+@test "text that is not ASCII survives the rewrites, escaped or raw" {
+  mkdir -p "$HOME/.claude"
+  printf '%s\n' '{"note": "Skellefteå — café", "raw": "Skellefteå — café", "permissions": {"ask": ["Bash(kill*)"]}}' > "$HOME/.claude/settings.json"
+  "$REPO/install.sh" 2>/dev/null
+  s="$HOME/.claude/settings.json"
+  jq -e '.note == "Skellefteå — café" and .raw == "Skellefteå — café" and .note == .raw' "$s"
+  iconv -f UTF-8 -t UTF-8 "$s" >/dev/null                       # the file is valid UTF-8
+  "$REPO/install.sh" 2>/dev/null
+  jq -e '.note == "Skellefteå — café" and .raw == .note' "$s"
+}
 
-# --- 3f: autoMode tells the classifier what a ct workspace is ----------------
+@test "a settings file that is a link is edited where it lives, and stays a link" {
+  mkdir -p "$HOME/.claude" "$HOME/dotfiles"
+  jq -n --argjson ask "$released_ask" '{permissions: {ask: $ask}}' > "$HOME/dotfiles/claude-settings.json"
+  ln -s "$HOME/dotfiles/claude-settings.json" "$HOME/.claude/settings.json"
+  "$REPO/install.sh" 2>/dev/null
+  [ -L "$HOME/.claude/settings.json" ]
+  jq -e '(.permissions | has("ask") | not) and .autoMode.classifyAllShell == true' "$HOME/dotfiles/claude-settings.json"
+  grep -qxF "retire-shipped-rules-1" "$HOME/dotfiles/.ct-migrations"
+}
+
+
+# --- 3f: autoMode: every shell command is classified, and the workspace is described ---
 
 ct_env()   { jq -r '.autoMode.environment[] | select(startswith("**Workspace layout (ct)**:"))' "$1"; }
 ct_allow() { jq -r '.autoMode.allow[] | select(startswith("Workspace Scratch Cleanup (ct):"))' "$1"; }
@@ -372,6 +475,23 @@ ct_allow() { jq -r '.autoMode.allow[] | select(startswith("Workspace Scratch Cle
   [[ "$(ct_env "$s")" == *"is not itself a git repository"* ]]
   [[ "$(ct_allow "$s")" == *".scratch/"* ]]
   jq -e '.autoMode | has("soft_deny") | not' "$s"      # ct blocks nothing more, and unblocks nothing
+  jq -e '.autoMode.classifyAllShell == true' "$s"
+}
+
+# By default a Bash allow rule settles a command before the classifier runs, in auto mode too.
+# `Bash(direnv exec *)`, one "don't ask again" away, then allows `direnv exec . kubectl delete`.
+@test "every shell command goes to the classifier: set where the key is absent, kept where the owner set it" {
+  mkdir -p "$HOME/.claude" "$CT_HOME/.profiles/off/claude"
+  echo '{"model":"x"}' > "$HOME/.claude/settings.json"
+  echo '{"autoMode":{"classifyAllShell":false,"environment":["$defaults"]}}' > "$CT_HOME/.profiles/off/claude/settings.json"
+  run "$REPO/install.sh"
+  [[ "$output" == *"every shell command goes to the classifier (classifyAllShell)"* ]]
+  jq -e '.autoMode.classifyAllShell == true' "$HOME/.claude/settings.json"
+  jq -e '.autoMode.classifyAllShell == false' "$CT_HOME/.profiles/off/claude/settings.json"
+  h1=$(sha256sum < "$HOME/.claude/settings.json")
+  run "$REPO/install.sh"
+  [[ "$output" != *"classifyAllShell"* ]]
+  [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
 }
 
 @test "settings without autoMode gain ct's entries after \$defaults" {
@@ -411,9 +531,19 @@ ct_allow() { jq -r '.autoMode.allow[] | select(startswith("Workspace Scratch Cle
   jq -e '.autoMode.environment[0] == "$defaults" and .autoMode.environment[1] == (.autoMode.environment | map(select(test("^\\*\\*Workspace layout"))) | .[0])' "$s"
 }
 
+@test "an autoMode list that is not a list is left as it is, and said" {
+  mkdir -p "$HOME/.claude"
+  echo '{"autoMode":{"allow":"some string","classifyAllShell":true}}' > "$HOME/.claude/settings.json"
+  run "$REPO/install.sh"
+  [[ "$output" == *"autoMode.allow in"*"is not a list; left as it is"* ]]
+  jq -e '.autoMode.allow == "some string"' "$HOME/.claude/settings.json"
+  [[ -n "$(ct_env "$HOME/.claude/settings.json")" ]]     # the lists that are lists still get theirs
+}
+
 @test "every profile's settings describe the workspace too" {
   mkdir -p "$CT_HOME/.profiles/acme/claude"; echo '{"model":"m"}' > "$CT_HOME/.profiles/acme/claude/settings.json"
   "$REPO/install.sh" 2>/dev/null
   [[ -n "$(ct_env "$CT_HOME/.profiles/acme/claude/settings.json")" ]]
   [[ -n "$(ct_allow "$CT_HOME/.profiles/acme/claude/settings.json")" ]]
+  jq -e '.autoMode.classifyAllShell == true' "$CT_HOME/.profiles/acme/claude/settings.json"
 }

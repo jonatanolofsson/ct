@@ -86,11 +86,12 @@ sessions share:
   add a section about your own work.
 - **Scratch files** go in `<workspace>/.scratch/`. Delete your own when you are finished with them. A file
   someone else deletes mid-use, or a directory a reboot wipes (`/tmp`), is lost work, not cleanup.
-- **Delete scratch files with a plain `rm` and literal paths** (`rm -f <workspace>/.scratch/x.json`). That runs
-  without a prompt in every permission mode: ct registers `ct-scratch-guard`, a hook that allows an `rm` it can
-  check to stay inside a workspace's `.scratch/`. It cannot check a variable, a glob, `$(…)`, `sudo`, or a
-  relative path after a `cd`. Those, and every other `rm`, it leaves to the normal decision (next section); the
-  hook itself never asks.
+- **Delete scratch files with a plain `rm` and literal paths, as a command of its own**
+  (`rm -f <workspace>/.scratch/x.json`). That runs without a prompt: ct registers `ct-scratch-guard`, a hook
+  that allows a command when all it does is `rm` inside a workspace's `.scratch/`. Its allow is for the whole
+  command, so it gives none when anything else rides along (`rm … && git push`, a pipe, a redirect to a file),
+  or when it cannot check a path: a variable, a glob, `$(…)`, `sudo`. Those, and every other `rm`, it leaves to
+  the normal decision (next section); the hook itself never asks.
 
 ## Nobody is there to approve: work so that nothing has to be
 The person is usually away, and a call that waits for them can wait for hours. So the permission set-up ct

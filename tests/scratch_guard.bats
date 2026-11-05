@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
-# ct-scratch-guard: an rm it can check to stay inside a workspace .scratch/ is allowed. Every
-# other command gets no decision: the guard never asks (it did until 0.12, and raised 210
-# prompts in ten days on one machine, one of them refused). Runs against a throwaway workspace root.
+# ct-scratch-guard: a command that is nothing but rm inside a workspace .scratch/ is allowed.
+# Every other command gets no decision: the guard never asks (it did until 0.12, and raised 210
+# prompts in ten days on one machine, one of them refused). The allow is for the whole Bash
+# call, so anything beside the rm takes it away. Runs against a throwaway workspace root.
 
 setup() {
   ROOT="$BATS_TEST_TMPDIR/dev"
@@ -34,9 +35,46 @@ expect() {  # expect <want> <command>
   expect allow "direnv exec . rm -f $WS/.scratch/a.txt"
 }
 
-@test "redirections and trailing commands do not lose the allow" {
-  expect allow "rm -f $WS/.scratch/a.txt 2>/dev/null; ls"
+@test "output sent to /dev/null, and several rm in one command, keep the allow" {
+  expect allow "rm -f $WS/.scratch/a.txt 2>/dev/null"
   expect allow "rm -f $WS/.scratch/a.txt >/dev/null 2>&1"
+  expect allow "rm -f $WS/.scratch/a.txt 2> /dev/null;"
+  expect allow "rm -f $WS/.scratch/a.txt; rm -rf $WS/.scratch/sub"
+  expect allow "rm -f $WS/.scratch/a.txt && rm -f $WS/.scratch/b.txt 2>/dev/null"
+  expect allow "rm -f -- $WS/.scratch/-odd-name"
+  expect allow "command rm -f $WS/.scratch/a.txt"
+}
+
+# A hook's allow is for the entire Bash call. The guard used to judge the rm and skip every
+# other segment, so each of these came back "allow" (review of 0.12, before release).
+@test "anything beside the rm takes the allow away, because the allow would cover it too" {
+  ok="rm -f $WS/.scratch/a.txt"
+  expect none "$ok && git push --force origin main"
+  expect none "$ok; kubectl delete namespace prod"
+  expect none "$ok; ls"
+  expect none "ls; $ok"
+  expect none "$ok; if true; then rm -rf $WS/repo; fi"
+  expect none "$ok; for f in 1; do rm -rf $WS/repo; done"
+  expect none "$ok; FOO=1 rm -rf $WS/repo"
+  expect none "$ok; bash -c 'rm -rf $WS/repo'"
+  expect none "$ok; timeout 5 rm -rf $WS/repo"
+  expect none "$ok; env -i rm -rf $WS/repo"
+  expect none "$ok; nice -n 5 rm -rf $WS/repo"
+  expect none "$ok; time -p rm -rf $WS/repo"
+  expect none "$ok; exec rm -rf $WS/repo"
+  expect none "$ok; ! rm -rf $WS/repo"
+  expect none "$ok; direnv exec . sudo rm -rf $WS/repo"
+  expect none "$ok | tee $WS/repo/x"
+  expect none "$ok &"
+  expect none "$ok & rm -rf $WS/repo"
+}
+
+@test "a redirection to a file, and a path that is only digits, are not waved through" {
+  expect none "rm -f $WS/.scratch/a.txt >$WS/repo/x"
+  expect none "rm -f $WS/.scratch/a.txt > $WS/repo/x"
+  expect none "rm -f $WS/.scratch/a.txt 2>$WS/repo/x"
+  expect none "rm -rf $WS/.scratch/a.txt 2024"
+  expect none "rm -f $WS/.scratch/a.txt < /dev/null"
 }
 
 @test "a relative path resolves against the session's directory" {

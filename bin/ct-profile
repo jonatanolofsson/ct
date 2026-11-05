@@ -34,6 +34,10 @@ claude_profile() { # name [bedrock]
   (umask 077 && mkdir -p "$dir")
   src="$HOME/.claude/settings.json"
   if [[ -f $src ]]; then cp "$src" "$dir/settings.json"; else echo '{}' > "$dir/settings.json"; fi
+  # The copy has been through the installer's one-time migrations already; the
+  # record goes with it. Without it the installer would run them again on the
+  # profile and take out a rule its owner had put back into the machine's file.
+  [[ -f $src && -f $HOME/.claude/.ct-migrations ]] && cp "$HOME/.claude/.ct-migrations" "$dir/.ct-migrations"
   for d in skills agents commands plugins; do
     [[ -e $HOME/.claude/$d ]] && ln -sfn "$HOME/.claude/$d" "$dir/$d"
   done

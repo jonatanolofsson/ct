@@ -48,9 +48,9 @@ weeks on one machine with nineteen agents: 1898 permission prompts, 5 of them re
 - **Where they came from.** 1308 were raised in auto mode, nearly all by `ask` rules and by a hook that asked. 568
   came from sessions that had been switched to accept-edits or manual mode to let one action through and then
   stayed there, where half of all calls prompt.
-- **What ct does about the first.** `install.sh` removes every ask rule a template ever shipped from an
-  existing `settings.json` (`templates/retired-ask-rules.txt`), keeps the rules its owner added, and says how
-  many went. `ct-scratch-guard` allows `rm` inside a workspace `.scratch/` and otherwise stays silent.
+- **What ct does about the first.** `install.sh` retires the ask rules a template shipped
+  (`templates/retired-ask-rules.txt`) from an existing `settings.json`, once, and says how many went. It keeps
+  the rules the owner added, and any they add afterwards. `ct-scratch-guard` stays silent where it used to ask.
 - **What ct does about the second.** A conversation left in accept-edits or manual mode is resumed in the
   settings' `permissions.defaultMode`. Plan mode is kept, and so is the caller's own `--permission-mode`.
   The conventions tell agents what to do when auto mode refuses: name the action and the reply that
@@ -60,9 +60,20 @@ weeks on one machine with nineteen agents: 1898 permission prompts, 5 of them re
   entries labelled `(ct)`, which describe the workspace layout, and leaves every other entry alone. See
   [bootstrap integration](docs/bootstrap-integration.md).
 
-Outside auto mode Claude Code prompts for every command no allow rule covers, with or without ask rules, so
-removing them takes no prompt away from someone who chose that mode. The one place an ask rule still stood
-guard was bypass mode, which ct does not set up.
+Taking ask rules away must not hand the decision to nobody, so three things go with it:
+
+- **Every shell command reaches the classifier** (`autoMode.classifyAllShell`, set where the key is absent).
+  By default an allow rule settles a command before the classifier runs, in auto mode too, and
+  `Bash(direnv exec *)`, one "don't ask again" away, allows `direnv exec . kubectl delete …` unseen. Six of
+  nineteen workspaces held that rule.
+- **An ask rule that guards an allow rule of the owner's is kept.** With `Bash(git *)` in the same file, the
+  template's ask rule was what stopped `git push --force` outside auto mode. The installer keeps such a rule
+  and names the allow rule, for the owner to drop one or the other.
+- **The scratch guard allows a whole command or nothing.** A hook's allow covers the entire Bash call, so
+  `rm <scratch file> && git push --force` gets none.
+
+Outside auto mode Claude Code prompts for every command no allow rule covers, with or without ask rules. In
+bypass mode nothing asks at all: the ask rules were the one guard there, and ct does not set that mode up.
 
 ### The workspace's environment: logins belong to a workspace or a profile
 
