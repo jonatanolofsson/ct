@@ -609,6 +609,44 @@ if [[ -n $sid ]]; then
   else echo "ct: resuming $sid (CT_FRESH=1 for a new conversation)" >&2; fi
 fi
 
+# A resumed conversation comes back in the permission mode its settings name.
+# Claude restores the mode a conversation was LEFT in, so a session someone
+# switched out of auto mode to approve one action stays in accept-edits or
+# manual across every restart, and there every command that no allow rule
+# covers prompts: measured on one machine, a prompt for half the calls against
+# 2.5% in auto mode, and one agent that had been there for ten days. So when the
+# settings name a default mode and the conversation was left in accept-edits or
+# manual, ct passes that default. Plan mode is left alone: someone put the agent
+# there to keep it from acting. The caller's own --permission-mode wins, and
+# CT_KEEP_MODE=1 keeps whatever the conversation had.
+#
+# Both values are read from files Claude writes: `permissions.defaultMode` in
+# the settings, and the transcript's last `permission-mode` record. If either
+# is missing or its form changes, nothing is passed and Claude restores the
+# mode as before.
+moded=0
+for a in "$@"; do
+  case "$a" in --permission-mode|--permission-mode=*|--dangerously-skip-permissions) moded=1 ;; esac
+done
+if [[ -n $sid && -z "${CT_KEEP_MODE:-}" ]] && ((moded == 0)); then
+  mode_cfg="$(claude_dir "$agent_ws")/settings.json"
+  mode_log="$(transcripts "$workspace")/$sid.jsonl"
+  mode_want="" mode_last=""
+  # `|| true`: a transcript without such a record makes grep fail, and under
+  # `set -e` with pipefail that would end ct instead of starting the agent.
+  if [[ -f $mode_cfg ]]; then
+    mode_want=$(sed -n 's/.*"defaultMode"[[:space:]]*:[[:space:]]*"\([A-Za-z]*\)".*/\1/p' "$mode_cfg" | head -1) || true
+  fi
+  if [[ -n $mode_want && -f $mode_log ]]; then
+    mode_last=$(grep -o '"type":"permission-mode","permissionMode":"[A-Za-z]*"' "$mode_log" | tail -1 | sed 's/.*:"\([A-Za-z]*\)"$/\1/') || true
+  fi
+  if [[ $mode_last == acceptEdits || $mode_last == default ]] && [[ -n $mode_want && $mode_want != "$mode_last" ]]; then
+    # The settings call manual mode "default"; the command line calls it "manual".
+    cmd+=" --permission-mode $(printf '%q' "${mode_want/#default/manual}")"
+    echo "ct: this conversation was left in $mode_last mode; resuming it in $mode_want, the settings' defaultMode (CT_KEEP_MODE=1 keeps it)" >&2
+  fi
+fi
+
 # Name the CLAUDE session after the workspace as well. Without -n every session
 # gets a random adjective-noun pair ("frolicking-prism"), which is what makes a
 # dozen parallel workspaces indistinguishable in the prompt box, the /resume
