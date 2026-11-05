@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
-# ct-scratch-guard: rm inside a workspace .scratch/ is allowed, any other rm asks,
-# commands without rm get no decision. Runs against a throwaway workspace root.
+# ct-scratch-guard: an rm it can check to stay inside a workspace .scratch/ is allowed. Every
+# other command gets no decision: the guard never asks (it did until 0.12, and raised 210
+# prompts in ten days on one machine, one of them refused). Runs against a throwaway workspace root.
 
 setup() {
   ROOT="$BATS_TEST_TMPDIR/dev"
@@ -11,7 +12,7 @@ setup() {
   GUARD="$BATS_TEST_DIRNAME/../bin/ct-scratch-guard"
 }
 
-decide() {  # decide <command> -> prints allow|ask|none
+decide() {  # decide <command> -> prints allow or none (or whatever else it said)
   local out
   out=$(perl -MJSON::PP -e 'print encode_json({tool_name=>"Bash",cwd=>$ARGV[1],tool_input=>{command=>$ARGV[0]}})' "$1" "$WS" \
         | "$GUARD" "$ROOT")
@@ -33,7 +34,7 @@ expect() {  # expect <want> <command>
   expect allow "direnv exec . rm -f $WS/.scratch/a.txt"
 }
 
-@test "redirections and trailing commands do not turn an allow into ask" {
+@test "redirections and trailing commands do not lose the allow" {
   expect allow "rm -f $WS/.scratch/a.txt 2>/dev/null; ls"
   expect allow "rm -f $WS/.scratch/a.txt >/dev/null 2>&1"
 }
@@ -46,29 +47,29 @@ expect() {  # expect <want> <command>
   expect allow "rm $WS/.scratch/link"
 }
 
-@test "anything else with rm asks" {
-  expect ask "rm -rf $WS/.scratch"
-  expect ask "rm -rf $WS/.scratch/"
-  expect ask "rm -rf $WS/.scratch/../repo"
-  expect ask "rm -rf $WS/.scratch/link/x"
-  expect ask "rm $WS/repo/x"
-  expect ask "rm -f $ROOT/ws2/.scratch/x"
-  expect ask "rm -f /etc/hosts"
+@test "an rm that leaves .scratch gets no decision, so the normal permission flow decides" {
+  expect none "rm -rf $WS/.scratch"
+  expect none "rm -rf $WS/.scratch/"
+  expect none "rm -rf $WS/.scratch/../repo"
+  expect none "rm -rf $WS/.scratch/link/x"
+  expect none "rm $WS/repo/x"
+  expect none "rm -f $ROOT/ws2/.scratch/x"
+  expect none "rm -f /etc/hosts"
 }
 
-@test "doubt asks: variables, globs, substitutions, root, cd, parse errors" {
-  expect ask 'rm -f "$S/a.txt"'
-  expect ask "rm -f $WS/.scratch/*.txt"
-  expect ask 'x=$(rm foo)'
-  expect ask "sudo rm $WS/.scratch/a.txt"
-  expect ask "cd /tmp && rm -f .scratch/a.txt"
-  expect ask "rm -f \"$WS/.scratch/a.txt"
-  expect ask "rm -f"
-  expect ask "rm --no-preserve-root $WS/.scratch/a.txt"
+@test "doubt is never allow: variables, globs, substitutions, root, cd, parse errors" {
+  expect none 'rm -f "$S/a.txt"'
+  expect none "rm -f $WS/.scratch/*.txt"
+  expect none 'x=$(rm foo)'
+  expect none "sudo rm $WS/.scratch/a.txt"
+  expect none "cd /tmp && rm -f .scratch/a.txt"
+  expect none "rm -f \"$WS/.scratch/a.txt"
+  expect none "rm -f"
+  expect none "rm --no-preserve-root $WS/.scratch/a.txt"
 }
 
-@test "one rm outside .scratch makes the whole command ask" {
-  expect ask "rm -f $WS/.scratch/a.txt && rm -rf /tmp/x"
+@test "one rm outside .scratch takes the allow from the whole command" {
+  expect none "rm -f $WS/.scratch/a.txt && rm -rf /tmp/x"
 }
 
 @test "commands without rm get no decision" {

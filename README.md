@@ -29,12 +29,40 @@ Settings are environment variables, never flags. Every argument is forwarded to 
 | `CT_WORKSPACE_ROOT` | a single workspace root instead of `~/dev` and `~/workspaces` |
 | `CT_PROFILE` | at a workspace's first launch: share the named login profile (see below) instead of its own logins |
 | `CT_BEDROCK_SETTINGS` | for `ct-profile claude <name> bedrock`: the site's Claude settings for its Bedrock backend (a JSON file merged into the profile's) |
+| `CT_SESSION_ID` + `CT_NAME` | pin one claude conversation by id, run from its own directory (see below) |
+| `CT_WAKE` | `0`: ct-autostart wakes nobody with a message (see below) |
+| `CT_KEEP_MODE` | resume a conversation in the permission mode it was left in, even accept-edits or manual (see below) |
 
 ct also *exports* two variables into every agent it starts, so the workspace conventions' "Add a repo"
 recipe runs as written: `CT_WORKSPACE` (the agent's workspace) and `WORKSPACE_ROOT` (the root holding
 `.gitcache/`, `.env` and `.kubeconfig`). A pinned session gets the workspace that holds its directory.
-| `CT_SESSION_ID` + `CT_NAME` | pin one claude conversation by id, run from its own directory (see below) |
-| `CT_WAKE` | `0`: ct-autostart wakes nobody with a message (see below) |
+
+### Permissions: nothing asks by rule
+
+The settings ct seeds (`templates/claude-settings.json`) start every agent in Claude Code's auto mode and hold
+no `ask` rule. In auto mode a classifier settles each action at once: routine work runs, and what destroys
+work, touches production or leaves the trusted remotes is refused unless the person asked for exactly that. An
+`ask` rule prompts where the classifier would have decided, and the person is rarely there. Measured over four
+weeks on one machine with nineteen agents: 1898 permission prompts, 5 of them refused.
+
+- **Where they came from.** 1308 were raised in auto mode, nearly all by `ask` rules and by a hook that asked. 568
+  came from sessions that had been switched to accept-edits or manual mode to let one action through and then
+  stayed there, where half of all calls prompt.
+- **What ct does about the first.** `install.sh` removes every ask rule a template ever shipped from an
+  existing `settings.json` (`templates/retired-ask-rules.txt`), keeps the rules its owner added, and says how
+  many went. `ct-scratch-guard` allows `rm` inside a workspace `.scratch/` and otherwise stays silent.
+- **What ct does about the second.** A conversation left in accept-edits or manual mode is resumed in the
+  settings' `permissions.defaultMode`. Plan mode is kept, and so is the caller's own `--permission-mode`.
+  The conventions tell agents what to do when auto mode refuses: name the action and the reply that
+  authorises it, and never ask for a change of mode.
+- **What a site adds.** `autoMode.environment` in the same file describes the site to the classifier: its
+  organisation, source-control hosts, clusters, registries, what counts as production. ct owns only the
+  entries labelled `(ct)`, which describe the workspace layout, and leaves every other entry alone. See
+  [bootstrap integration](docs/bootstrap-integration.md).
+
+Outside auto mode Claude Code prompts for every command no allow rule covers, with or without ask rules, so
+removing them takes no prompt away from someone who chose that mode. The one place an ask rule still stood
+guard was bypass mode, which ct does not set up.
 
 ### The workspace's environment: logins belong to a workspace or a profile
 

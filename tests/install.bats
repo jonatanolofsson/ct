@@ -93,24 +93,24 @@ json() {  # json <perl expression over $d> : exit status of the expression
 
 guard_cmd() { printf "'%s' '%s'" "$CT_PREFIX/ct-scratch-guard" "$CT_HOME"; }
 
-@test "a fresh install registers the scratch guard and has no rm ask rule" {
+@test "a fresh install registers the scratch guard and ships no ask rule" {
   "$REPO/install.sh" 2>/dev/null
   [ -x "$CT_PREFIX/ct-scratch-guard" ]
   want=$(guard_cmd)
   json 'grep { $_->{command} eq "'"$want"'" } map { @{$_->{hooks}} } @{$d->{hooks}{PreToolUse}}'
-  json '!grep { /\brm \*/ } @{$d->{permissions}{ask}}'
-  json 'grep { $_ eq "Bash(git push*--force *)" } @{$d->{permissions}{ask}}'
-  json '!grep { $_ eq "Bash(git push --force*)" } @{$d->{permissions}{ask}}'
-  json 'grep { $_ eq "Bash(git *)" } @{$d->{permissions}{allow}}'
+  json '!exists $d->{permissions}{ask}'
+  json 'grep { $_ eq "Bash(git add *)" } @{$d->{permissions}{allow}}'
+  json '!grep { $_ eq "Bash(git *)" } @{$d->{permissions}{allow}}'
+  json '$d->{permissions}{defaultMode} eq "auto"'
 }
 
-@test "an existing settings.json loses exactly the template's rm rules and keeps its own" {
+@test "an existing settings.json loses the template's rm rules and keeps its own" {
   mkdir -p "$HOME/.claude"
-  printf '%s\n' '{"permissions": {"ask": ["Bash(rm *)", "Bash(rm -i *)", "Bash(direnv exec*rm *)", "Bash(kill*)"]},
+  printf '%s\n' '{"permissions": {"ask": ["Bash(rm *)", "Bash(rm -i *)", "Bash(direnv exec*rm *)"]},
     "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "/x/pkill-guard.sh"}]}]}}' \
     > "$HOME/.claude/settings.json"
   "$REPO/install.sh" 2>/dev/null
-  json 'join(",", @{$d->{permissions}{ask}}) eq "Bash(rm -i *),Bash(kill*)"'
+  json 'join(",", @{$d->{permissions}{ask}}) eq "Bash(rm -i *)"'
   json '@{$d->{hooks}{PreToolUse}} == 2 && $d->{hooks}{PreToolUse}[0]{hooks}[0]{command} eq "/x/pkill-guard.sh"'
 }
 
@@ -138,7 +138,7 @@ guard_cmd() { printf "'%s' '%s'" "$CT_PREFIX/ct-scratch-guard" "$CT_HOME"; }
   [ "$(cat "$HOME/.claude/settings.json")" = "not json" ]
 }
 
-@test "the registered command, run as Claude Code runs it, allows scratch and asks elsewhere" {
+@test "the registered command, run as Claude Code runs it, allows scratch and is silent elsewhere" {
   "$REPO/install.sh" 2>/dev/null
   mkdir -p "$CT_HOME/ws/.scratch"
   cmd=$(perl -MJSON::PP -e 'local $/; open F, shift; my $d = decode_json(<F>);
@@ -150,12 +150,19 @@ guard_cmd() { printf "'%s' '%s'" "$CT_PREFIX/ct-scratch-guard" "$CT_HOME"; }
   [[ "$output" == *'"permissionDecision":"allow"'* ]]
   hook_input "rm -f /etc/hosts"
   run sh -c "$cmd" < "$BATS_TEST_TMPDIR/in.json"
-  [[ "$output" == *'"permissionDecision":"ask"'* ]]
+  [ "$status" -eq 0 ] && [ -z "$output" ]      # no decision: auto mode's classifier, or a prompt, decides
 }
 
 @test "the conventions block tells agents where plans live" {
   "$REPO/install.sh" 2>/dev/null
   grep -q '<workspace>/.claude/plans/' "$CT_HOME/CLAUDE.md"
+}
+
+@test "the conventions block tells agents what to do when auto mode refuses" {
+  "$REPO/install.sh" 2>/dev/null
+  grep -q 'A refusal is an answer' "$CT_HOME/CLAUDE.md"
+  grep -q 'do not ask the person to change mode' "$CT_HOME/CLAUDE.md"
+  grep -q 'hook itself never asks' "$CT_HOME/CLAUDE.md"
 }
 
 @test "every profile's Claude settings get the scratch guard and plansDirectory, not only ~/.claude" {
@@ -173,11 +180,12 @@ guard_cmd() { printf "'%s' '%s'" "$CT_PREFIX/ct-scratch-guard" "$CT_HOME"; }
 }
 
 
-# --- 3d: git is allowed whole; only what destroys work or history asks -------
+# --- 3d: nothing asks by rule; auto mode's classifier decides ----------------
 
 # Claude Code's Bash rule: the command must match the whole pattern, `*` any run of characters;
-# deny wins over ask, ask over allow.
-decide() {  # decide <command> : prints ask, allow or none, from the installed settings
+# deny wins over ask, ask over allow. "none" is what the classifier (or, outside auto mode, a
+# prompt) decides.
+decide() {  # decide <command> : prints deny, ask, allow or none, from the installed settings
   perl -MJSON::PP -e '
     local $/; open F, $ARGV[0]; my $d = decode_json(<F>); my $cmd = $ARGV[1];
     my $hit = sub { for (@{ $_[0] || [] }) { next unless /^Bash\((.*)\)$/s; my $p = $1;
@@ -188,140 +196,120 @@ decide() {  # decide <command> : prints ask, allow or none, from the installed s
   ' "$HOME/.claude/settings.json" "$1"
 }
 
-@test "destructive git asks, in every form, and the rest of git runs unprompted" {
+# The ask rules of the template as it was released (ct 0.9.0 to 0.11.0): what a machine holds today.
+released_ask='["Bash(git push --force*)","Bash(git reset --hard*)","Bash(git checkout -- *)","Bash(git clean*)","Bash(git branch -D*)","Bash(kill*)","Bash(pkill*)","Bash(reboot*)","Bash(shutdown*)","Bash(systemctl restart*)","Bash(systemctl stop*)","Bash(systemctl enable*)","Bash(systemctl disable*)","Bash(kubectl apply*)","Bash(kubectl delete*)","Bash(kubectl patch*)","Bash(kubectl edit*)","Bash(kubectl scale*)","Bash(kubectl cordon*)","Bash(kubectl drain*)","Bash(kubectl taint*)","Bash(helm install*)","Bash(helm upgrade*)","Bash(helm uninstall*)","Bash(helm rollback*)","Bash(direnv exec*git push --force*)","Bash(direnv exec*git reset --hard*)","Bash(direnv exec*git checkout -- *)","Bash(direnv exec*git clean*)","Bash(direnv exec*git branch -D*)","Bash(direnv exec*kubectl apply*)","Bash(direnv exec*kubectl delete*)","Bash(direnv exec*kubectl patch*)","Bash(direnv exec*kubectl edit*)","Bash(direnv exec*kubectl scale*)","Bash(direnv exec*kubectl cordon*)","Bash(direnv exec*kubectl drain*)","Bash(direnv exec*kubectl taint*)","Bash(direnv exec*helm install*)","Bash(direnv exec*helm upgrade*)","Bash(direnv exec*helm uninstall*)","Bash(direnv exec*helm rollback*)"]'
+
+# Every rule of the retired list, as a JSON array: the template of ct #11 to #14 and all before it.
+retired_json() { grep -v '^#' "$REPO/templates/retired-ask-rules.txt" | jq -R . | jq -cs .; }
+
+@test "after a fresh install no command asks by rule: the classifier decides what no rule allows" {
   "$REPO/install.sh" 2>/dev/null
   while IFS= read -r cmd; do
-    [ "$(decide "$cmd")" = ask ] || { echo "should ask: $cmd"; return 1; }
-  done <<'ASK'
+    [ "$(decide "$cmd")" = none ] || { echo "should be left to the classifier: $cmd ($(decide "$cmd"))"; return 1; }
+  done <<'NONE'
 git push --force origin feat/a
-git push origin feat/a --force
-git push -f origin feat/a
-git push origin feat/a -f
-git push origin +main
-git push origin --delete feat/a
-git push -d origin feat/a
-git push origin :feat/a
-git -C /w/repo push origin :feat/a
-direnv exec . git push origin :feat/a
-git push --mirror backup
-git push --prune origin
-git -C /w/repo push --force origin feat/a
-direnv exec . git push --force origin feat/a
+git push --force-with-lease origin feat/a
+git push origin main
 git reset --hard HEAD~1
-git -C /w/repo reset --hard origin/main
 git checkout -- file.py
-git checkout HEAD -- file.py
-git checkout origin/main -- .
-git checkout -B main origin/feat/a
-git switch -C main origin/feat/a
-git branch -M feat/a main
-git rm -f file.py
-git rm -rf old
-git reset --merge HEAD~1
-git fetch origin +main:main
-git fetch -f origin feat/a:feat/a
-git worktree add -B main ../wt origin/feat/a
-git tag -f v1 HEAD~3
-git update-ref refs/heads/main abc123
-git rm -fr old
-git checkout .
-git checkout -f main
-git switch --discard-changes main
-git restore file.py
 git clean -fdx
 git branch -D feat/a
-git branch -f main HEAD~1
-git stash drop
-git stash clear
 git worktree remove --force ../wt
-git tag -d v1
-git reflog expire --expire=now --all
-git gc --prune=now
-git filter-branch --tree-filter x HEAD
-ASK
-  while IFS= read -r cmd; do
-    [ "$(decide "$cmd")" = allow ] || { echo "should run unprompted: $cmd ($(decide "$cmd"))"; return 1; }
-  done <<'ALLOW'
-git push --force-with-lease origin feat/a
-git push --force-with-lease=feat/a:abc123 origin feat/a
-git push --force-with-lease --force-if-includes origin feat/a
-direnv exec . git push --force-with-lease origin feat/a
-git -C /w/repo push --force-with-lease origin feat/a
-git push -q -u origin feat/a
-git push origin feat/a
-git push origin main:feat/a
 git commit -m 'x'
-git commit -q --amend --no-edit
-git commit -m 'docs: say when to push --force-with-lease'
-git fetch -q origin
-git pull --rebase
-git rebase origin/main
-git reset --soft HEAD~1
-git reset --keep HEAD~1
-git rm --cached file.py
-git rebase -i origin/main
-git switch -q -c feat/a origin/main
-git worktree add ../wt -b feat/a origin/main
-git stash push -u -m tag
-git branch -m old new
-git log --oneline -3
-git -C /w/repo status --short
-direnv exec . git status
+git -c alias.x=!sh x
+direnv exec . git push --force origin feat/a
+kill 1234
+pkill -f '^python server.py'
+kubectl delete pod probe -n dev
+kubectl apply -f probe.yaml
+direnv exec . kubectl delete pod probe -n dev
+helm upgrade app chart
+systemctl restart nginx
+rm -rf build
+NONE
+  while IFS= read -r cmd; do
+    [ "$(decide "$cmd")" = allow ] || { echo "should be allowed: $cmd ($(decide "$cmd"))"; return 1; }
+  done <<'ALLOW'
+git add src/a.py
+kubectl get pods -n dev
+direnv exec . kubectl logs deploy/app -n dev
+helm template chart
 ALLOW
+  [ "$(decide "rm -rf /")" = deny ]
 }
 
-@test "an existing settings.json has exactly the template's old git rules replaced, its own kept" {
+@test "the retired list holds every rule a template shipped, and the template none of them" {
+  # the released template's rules are all in the list
+  jq -r '.[]' <<<"$released_ask" | while IFS= read -r rule; do
+    grep -qxF -- "$rule" "$REPO/templates/retired-ask-rules.txt" || { echo "not retired: $rule"; exit 1; }
+  done
+  # every line is one Bash rule, and the template asks nothing
+  ! grep -v '^#' "$REPO/templates/retired-ask-rules.txt" | grep -qvE '^Bash\(.+\)$'
+  jq -e '.permissions | has("ask") | not' "$REPO/templates/claude-settings.json"
+}
+
+@test "settings as released lose every ask rule of the template, keep the owner's, and say so" {
   mkdir -p "$HOME/.claude"
-  printf '%s\n' '{"permissions": {
-      "ask": ["Bash(git push --force*)", "Bash(direnv exec*git push --force*)", "Bash(git clean*)", "Bash(git rebase -i*)", "Bash(kill*)"],
-      "allow": ["Bash(git add *)", "Read"]}}' > "$HOME/.claude/settings.json"
+  jq -n --argjson ask "$released_ask" '{model: "x", permissions: {
+      ask: ($ask + ["Bash(terraform apply*)", "Bash(git rebase -i*)"]),
+      allow: ["Bash(git add *)", "Read", "Bash(git commit -m '"'"' *)"],
+      defaultMode: "auto"}}' > "$HOME/.claude/settings.json"
+  chmod 600 "$HOME/.claude/settings.json"
+  [ "$(decide "kill 1234")" = ask ]
+  [ "$(decide "direnv exec . kubectl delete pod x -n dev")" = ask ]
+  run "$REPO/install.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"retired 42 ask rule(s) of the template"* ]]
+  json 'join(",", @{$d->{permissions}{ask}}) eq "Bash(terraform apply*),Bash(git rebase -i*)"'
+  json 'join(",", @{$d->{permissions}{allow}}) eq "Bash(git add *),Read,Bash(git commit -m \x27 *)"'
+  json '$d->{model} eq "x" && $d->{permissions}{defaultMode} eq "auto"'
+  [ "$(stat -c %a "$HOME/.claude/settings.json")" = "600" ]
+  [ "$(decide "kill 1234")" = none ]
+  [ "$(decide "git push --force origin main")" = none ]
+  [ "$(decide "terraform apply -auto-approve")" = ask ]
+  h1=$(sha256sum < "$HOME/.claude/settings.json")
+  run "$REPO/install.sh"
+  [[ "$output" != *"retired"* ]]
+  [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
+}
+
+@test "settings holding only the template's ask rules end with no ask list at all" {
+  mkdir -p "$HOME/.claude"
+  jq -n --argjson ask "$released_ask" '{permissions: {ask: $ask}}' > "$HOME/.claude/settings.json"
   "$REPO/install.sh" 2>/dev/null
-  json '!grep { $_ eq "Bash(git push --force*)" || $_ eq "Bash(direnv exec*git push --force*)" } @{$d->{permissions}{ask}}'
-  json 'grep { $_ eq "Bash(git rebase -i*)" } @{$d->{permissions}{ask}}'
-  json 'grep { $_ eq "Bash(kill*)" } @{$d->{permissions}{ask}}'
-  json '1 == grep { $_ eq "Bash(git clean*)" } @{$d->{permissions}{ask}}'
-  json 'grep { $_ eq "Bash(git push*--force *)" } @{$d->{permissions}{ask}}'
-  json '!grep { $_ eq "Bash(git add *)" } @{$d->{permissions}{allow}}'
-  json 'grep { $_ eq "Bash(git *)" } @{$d->{permissions}{allow}} and grep { $_ eq "Read" } @{$d->{permissions}{allow}}'
-  [ "$(decide "git push --force-with-lease origin feat/a")" = allow ]
+  json '!exists $d->{permissions}{ask}'
+}
+
+@test "settings seeded from ct #11 to #14 lose the git ask rules and the allow of git whole" {
+  mkdir -p "$HOME/.claude"
+  jq -n --argjson ask "$(retired_json)" '{permissions: {
+      ask: ($ask + ["Bash(terraform apply*)"]),
+      allow: ["Bash(git *)", "Bash(direnv exec*git *)", "WebFetch", "Bash(kubectl get:*)"]}}' > "$HOME/.claude/settings.json"
+  [ "$(decide "git push --force origin main")" = ask ]
+  [ "$(decide "git push origin main")" = allow ]
+  "$REPO/install.sh" 2>/dev/null
+  json 'join(",", @{$d->{permissions}{ask}}) eq "Bash(terraform apply*)"'
+  json 'join(",", @{$d->{permissions}{allow}}) eq "Bash(git add *),WebFetch,Bash(kubectl get:*)"'
+  # Without its ask rules, an allow of git whole would have let this through unseen.
+  [ "$(decide "git push --force origin main")" = none ]
+  [ "$(decide "git add a.py")" = allow ]
   h1=$(sha256sum < "$HOME/.claude/settings.json")
   "$REPO/install.sh" 2>/dev/null
   [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
 }
 
-
-@test "settings from ct #11 get a colon-refspec rule that matches a colon" {
+@test "an allow of git whole that its owner wrote is kept" {
   mkdir -p "$HOME/.claude"
-  perl -pe 's/push\* :\*\*\)/push* :*)/' "$REPO/templates/claude-settings.json" > "$HOME/.claude/settings.json"
-  [ "$(decide "git push origin :feat/a")" = allow ]   # `:*` ends the rule as a wildcard
+  jq -n --argjson ask "$released_ask" '{permissions: {ask: $ask, allow: ["Bash(git *)", "Read"]}}' > "$HOME/.claude/settings.json"
   "$REPO/install.sh" 2>/dev/null
-  json '!grep { / :\*\)$/ } @{$d->{permissions}{ask}}'
-  json '4 == grep { / :\*\*\)$/ } @{$d->{permissions}{ask}}'
-  [ "$(decide "git checkout -B main origin/feat/a")" = ask ]   # forms added since ct #11 come along
-  [ "$(decide "git tag -f v1 HEAD~3")" = ask ]
-  [ "$(decide "git push origin :feat/a")" = ask ]
-  [ "$(decide "direnv exec . git -C /w/repo push origin :feat/a")" = ask ]
-  [ "$(decide "git push origin feat/a")" = allow ]
-  h1=$(sha256sum < "$HOME/.claude/settings.json")
-  "$REPO/install.sh" 2>/dev/null
-  [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
+  json 'join(",", @{$d->{permissions}{allow}}) eq "Bash(git *),Read"'
 }
 
-@test "settings from ct #13 get the forms added since" {
-  mkdir -p "$HOME/.claude"
-  # ct #13's template: today's without the forms added since, and update-ref asked only with -d
-  perl -ne 'next if /git (-C \* )?(fetch\*|worktree add\* -B|tag\* -f|tag\*--force)/; s/update-ref\*\)/update-ref* -d*)/; print' \
-    "$REPO/templates/claude-settings.json" > "$HOME/.claude/settings.json"
-  [ "$(decide "git tag -f v1 HEAD~3")" = allow ]
+@test "every profile's settings lose the template's ask rules too" {
+  mkdir -p "$CT_HOME/.profiles/acme/claude"
+  jq -n --argjson ask "$released_ask" '{permissions: {ask: ($ask + ["Bash(mine *)"])}}' > "$CT_HOME/.profiles/acme/claude/settings.json"
   "$REPO/install.sh" 2>/dev/null
-  [ "$(decide "git tag -f v1 HEAD~3")" = ask ]
-  [ "$(decide "direnv exec . git -C /w/repo fetch origin +main:main")" = ask ]
-  [ "$(decide "git update-ref refs/heads/main abc123")" = ask ]
-  json '!grep { /update-ref\* -d\*\)$/ } @{$d->{permissions}{ask}}'
-  [ "$(decide "git push --force-with-lease --force-if-includes origin feat/a")" = allow ]
-  h1=$(sha256sum < "$HOME/.claude/settings.json")
-  "$REPO/install.sh" 2>/dev/null
-  [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
+  jq -e '.permissions.ask == ["Bash(mine *)"]' "$CT_HOME/.profiles/acme/claude/settings.json"
 }
 
 @test "rm -rf of a workspace's scratch is not denied; rm -rf of the root is" {
@@ -343,4 +331,63 @@ ALLOW
   h1=$(sha256sum < "$HOME/.claude/settings.json")
   "$REPO/install.sh" 2>/dev/null
   [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
+}
+
+
+# --- 3f: autoMode tells the classifier what a ct workspace is ----------------
+
+ct_env()   { jq -r '.autoMode.environment[] | select(startswith("**Workspace layout (ct)**:"))' "$1"; }
+ct_allow() { jq -r '.autoMode.allow[] | select(startswith("Workspace Scratch Cleanup (ct):"))' "$1"; }
+
+@test "a fresh install describes the workspace to the classifier and keeps Claude Code's own entries" {
+  "$REPO/install.sh" 2>/dev/null
+  s="$HOME/.claude/settings.json"
+  jq -e '.autoMode.environment[0] == "$defaults" and .autoMode.allow[0] == "$defaults"' "$s"
+  [[ "$(ct_env "$s")" == *"is not itself a git repository"* ]]
+  [[ "$(ct_allow "$s")" == *".scratch/"* ]]
+  jq -e '.autoMode | has("soft_deny") | not' "$s"      # ct blocks nothing more, and unblocks nothing
+}
+
+@test "settings without autoMode gain ct's entries after \$defaults" {
+  mkdir -p "$HOME/.claude"; echo '{"model":"x"}' > "$HOME/.claude/settings.json"
+  "$REPO/install.sh" 2>/dev/null
+  s="$HOME/.claude/settings.json"
+  jq -e '(.autoMode.environment | length) == 2 and .autoMode.environment[0] == "$defaults"' "$s"
+  jq -e '(.autoMode.allow | length) == 2 and .autoMode.allow[0] == "$defaults"' "$s"
+  h1=$(sha256sum < "$s"); "$REPO/install.sh" 2>/dev/null; [ "$(sha256sum < "$s")" = "$h1" ]
+}
+
+@test "a site's own autoMode entries are kept as they are, with ct's added beside them" {
+  mkdir -p "$HOME/.claude"
+  printf '%s\n' '{"autoMode": {"environment": ["**Organization**: Acme", "**Source control**: git.acme.example/acme"],
+    "soft_deny": ["$defaults", "Acme Rule: never touch billing"]}}' > "$HOME/.claude/settings.json"
+  "$REPO/install.sh" 2>/dev/null
+  s="$HOME/.claude/settings.json"
+  # the site chose to replace the default environment: ct adds its entry and no $defaults
+  jq -e '.autoMode.environment[0:2] == ["**Organization**: Acme", "**Source control**: git.acme.example/acme"]' "$s"
+  jq -e '(.autoMode.environment | length) == 3 and (.autoMode.environment | index("$defaults") | not)' "$s"
+  [[ -n "$(ct_env "$s")" ]]
+  jq -e '.autoMode.soft_deny == ["$defaults", "Acme Rule: never touch billing"]' "$s"
+  jq -e '.autoMode.allow[0] == "$defaults"' "$s"       # a list ct creates keeps the defaults
+  h1=$(sha256sum < "$s"); "$REPO/install.sh" 2>/dev/null; [ "$(sha256sum < "$s")" = "$h1" ]
+}
+
+@test "an entry of ct's that a release reworded is replaced, and one it dropped is removed" {
+  mkdir -p "$HOME/.claude"
+  printf '%s\n' '{"autoMode": {"environment": ["$defaults", "**Workspace layout (ct)**: an older wording", "**Old thing (ct)**: gone since", "**Organization**: Acme"],
+    "allow": ["$defaults", "Workspace Scratch Cleanup (ct): an older wording"]}}' > "$HOME/.claude/settings.json"
+  "$REPO/install.sh" 2>/dev/null
+  s="$HOME/.claude/settings.json"
+  [[ "$(ct_env "$s")" == *"is not itself a git repository"* ]]
+  [[ "$(ct_allow "$s")" != *"an older wording"* ]]
+  jq -e '.autoMode.environment | map(select(test("\\(ct\\)"))) | length == 1' "$s"
+  jq -e '.autoMode.environment | index("**Organization**: Acme")' "$s"
+  jq -e '.autoMode.environment[0] == "$defaults" and .autoMode.environment[1] == (.autoMode.environment | map(select(test("^\\*\\*Workspace layout"))) | .[0])' "$s"
+}
+
+@test "every profile's settings describe the workspace too" {
+  mkdir -p "$CT_HOME/.profiles/acme/claude"; echo '{"model":"m"}' > "$CT_HOME/.profiles/acme/claude/settings.json"
+  "$REPO/install.sh" 2>/dev/null
+  [[ -n "$(ct_env "$CT_HOME/.profiles/acme/claude/settings.json")" ]]
+  [[ -n "$(ct_allow "$CT_HOME/.profiles/acme/claude/settings.json")" ]]
 }

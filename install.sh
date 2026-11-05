@@ -16,7 +16,9 @@
 #      a <!-- BEGIN ct-managed --> marker block (hand edits outside survive;
 #      site layers add their own block — see docs/bootstrap-integration.md)
 #   3. seeds ~/.claude/settings.json from the template ONLY if none exists,
-#      then adds what later releases need (plansDirectory, the scratch guard)
+#      then migrates an existing one step by step (plansDirectory, the scratch
+#      guard, the template's retired ask rules, autoMode's ct entries); what
+#      its owner wrote is kept
 #   4. stamps ~/.local/share/ct/VERSION
 set -euo pipefail
 
@@ -124,10 +126,12 @@ perl -MJSON::PP -e '
 # The conventions tell every agent to delete its own .scratch files, and the
 # template's `ask: Bash(rm *)` prompted for each one. An ask rule wins over any
 # hook, so the rule itself has to go and ct-scratch-guard (a PreToolUse hook)
-# carries the policy: rm inside <CT_HOME>/<ws>/.scratch/ is allowed, every other
-# rm still asks. Register the hook (or repoint it if CT_PREFIX/CT_HOME moved),
-# and only then remove exactly the two rules the template shipped; rules anyone
-# added themselves are left alone. Rewritten only when something changes.
+# allows rm inside <CT_HOME>/<ws>/.scratch/ in every permission mode. Any other
+# rm it leaves to Claude Code's normal flow (auto mode's classifier, or a prompt
+# outside auto mode); it never asks itself. Register the hook (or repoint it if
+# CT_PREFIX/CT_HOME moved), and only then remove exactly the two rules the
+# template shipped; rules anyone added themselves are left alone. Rewritten
+# only when something changes.
 perl -MJSON::PP -e '
     my ($f, $guard, $home) = @ARGV;
     local $/; open(my $in, "<", $f) or exit 0; my $raw = <$in>; close $in;
@@ -189,14 +193,62 @@ perl -MJSON::PP -e '
     print STDERR "ct-install: root deny narrowed in $f (scratch rm -rf no longer denied)\n";
 ' "$settings" "$srcdir/templates/claude-settings.json"
 
-# --- 3d. git runs unprompted but for what destroys work or history ----------
-# The template used to ask for `git push --force*`, which also caught
-# `--force-with-lease`, a session's normal push of its own rebased PR branch
-# (docs/workspace-conventions.md), and allowed only `git add`. Now git is
-# allowed whole and only destructive forms ask (the template lists them; an
-# ask rule wins over an allow). Only a file holding the template's old git
-# rules is changed: exactly those are replaced, and rules anyone added
-# themselves are left alone.
+# --- 3d. nothing asks by rule: auto mode's classifier decides ----------------
+# Every ask rule a template ever shipped is retired (the list is
+# templates/retired-ask-rules.txt; the template's "//" note says why). An ask
+# rule prompts where the classifier would have decided, and it wins over any
+# allow rule or hook: on one machine the shipped rules raised 1300 prompts in
+# four weeks, of which the person refused three. Exactly the listed rules leave
+# `permissions.ask`. A rule anyone added is kept, and the installer says how
+# many went, so none disappears unannounced.
+#
+# A file seeded from the template of ct #11 to #14 (never tagged) allowed git
+# whole, `Bash(git *)`, beside ask rules for the destructive forms. An allow
+# rule skips the classifier, so without those ask rules it would let a force
+# push through unseen: such a file gets `Bash(git add *)` back in its place. A
+# `Bash(git *)` its owner wrote, with no such ask rules beside it, is left alone.
+perl -MJSON::PP -e '
+    my ($f, $list) = @ARGV;
+    local $/;
+    open(my $in, "<", $f) or exit 0; my $raw = <$in>; close $in;
+    my $d = eval { JSON::PP->new->relaxed->decode($raw) };
+    exit 0 if !defined $d || ref $d ne "HASH" || ref $d->{permissions} ne "HASH";
+    open(my $l, "<", $list) or die "read $list: $!\n";
+    my %retired = map { $_ => 1 } grep { length && !/^#/ } split /\n/, <$l>; close $l;
+    my $p = $d->{permissions};
+    my $ask = ref $p->{ask} eq "ARRAY" ? $p->{ask} : [];
+    my @keep = grep { !$retired{$_} } @$ask;
+    my $gone = @$ask - @keep;
+    # ct #11 and later: this rule is in every such template and in none before.
+    my $git_whole = grep { $_ eq "Bash(git push*--force)" } @$ask;
+    my $changed = 0;
+    if ($gone) { if (@keep) { $p->{ask} = \@keep } else { delete $p->{ask} } $changed = 1 }
+    if ($git_whole && ref $p->{allow} eq "ARRAY") {
+        my %wide = map { $_ => 1 } ("Bash(git *)", "Bash(direnv exec*git *)");
+        my @allow = grep { !$wide{$_} } @{ $p->{allow} };
+        if (@allow != @{ $p->{allow} }) {
+            unshift @allow, "Bash(git add *)" unless grep { $_ eq "Bash(git add *)" } @allow;
+            $p->{allow} = \@allow; $changed = 1;
+        }
+    }
+    exit 0 unless $changed;
+    my $mode = (stat $f)[2] & 07777;
+    open(my $out, ">", "$f.ct-tmp") or die "write $f.ct-tmp: $!\n";
+    print $out JSON::PP->new->pretty->canonical->encode($d); close $out;
+    chmod $mode, "$f.ct-tmp"; rename "$f.ct-tmp", $f or die "rename: $!\n";
+    print STDERR "ct-install: retired $gone ask rule(s) of the template in $f (auto mode decides; rules you added are kept)\n";
+' "$settings" "$srcdir/templates/retired-ask-rules.txt"
+
+# --- 3f. the classifier is told what a ct workspace is -----------------------
+# Auto mode's classifier trusts "the repository the agent started in". ct starts
+# an agent in its workspace, which is no repository: asked to describe it, the
+# classifier's own set-up wrote "no remotes are configured" and then treated
+# every clone's remote as foreign. The template's `autoMode` entries labelled
+# `(ct)` say what the workspace is and that its .scratch/ is the agent's to
+# clean. They are ct's: added to a file that lacks them, replaced when a release
+# rewords one, removed when a release drops one. Every other entry is the
+# owner's or the site's and is left as it is. A list ct creates starts with
+# `$defaults`, without which it would replace Claude Code's own entries.
 perl -MJSON::PP -e '
     my ($f, $tmpl) = @ARGV;
     local $/;
@@ -204,36 +256,32 @@ perl -MJSON::PP -e '
     my $d = eval { JSON::PP->new->relaxed->decode($raw) };
     exit 0 if !defined $d || ref $d ne "HASH";
     open(my $t, "<", $tmpl) or die "read $tmpl: $!\n"; my $td = JSON::PP->new->relaxed->decode(<$t>); close $t;
-    my @old = ((map { ("Bash(git $_)", "Bash(direnv exec*git $_)") }
-        ("push --force*", "reset --hard*", "checkout -- *", "clean*", "branch -D*")),
-        # The colon-refspec rule as it was first written: a rule ending in `:*` is Claude
-        # Code"s trailing wildcard, the same as ` *`, so it never matched a colon.
-        map { ("Bash(${_}push* :*)", "Bash(${_}update-ref* -d*)") }
-            ("git ", "git -C * ", "direnv exec*git ", "direnv exec*git -C * "));
-    # ct #13 asked for `update-ref -d` alone; the template now asks for every update-ref, so
-    # that rule marks a file seeded before the forced fetch, tag and worktree forms were added.
-    my %new = map { $_ => 1 } grep { /\bgit / } map { @{ $td->{permissions}{$_} || [] } } "ask", "allow";
-    my %old = map { $_ => 1 } grep { !$new{$_} } @old, "Bash(git add *)";
-    # Only a file the template seeded (one holding its old git rules) is changed; a file
-    # without them keeps the git rules its owner chose, or none.
-    exit 0 unless ref $d->{permissions} eq "HASH"
-        && grep { $old{$_} } map { @{ ref $_ eq "ARRAY" ? $_ : [] } } @{ $d->{permissions} }{ "ask", "allow" };
+    if (exists $d->{autoMode} && ref $d->{autoMode} ne "HASH") { print STDERR "ct-install: autoMode in $f is not an object; left as it is\n"; exit 0 }
+    my $label = sub { $_[0] =~ /^(\*{0,2}[^:*]*\(ct\)\*{0,2}:)/ ? $1 : undef };
     my $changed = 0;
-    for my $kind ("ask", "allow") {
-        my $list = ref $d->{permissions}{$kind} eq "ARRAY" ? $d->{permissions}{$kind} : [];
-        my @keep = grep { !$old{$_} } @$list;
-        $changed = 1 if @keep != @$list;
-        my %have = map { $_ => 1 } @keep;
-        my @add = grep { !$have{$_} } grep { /\bgit / } @{ $td->{permissions}{$kind} };
-        $changed = 1 if @add;
-        $d->{permissions}{$kind} = [@add, @keep];
+    for my $key ("environment", "allow", "soft_deny") {
+        my %mine = map { $label->($_) => $_ } grep { defined $label->($_) } @{ $td->{autoMode}{$key} || [] };
+        my $have = $d->{autoMode}{$key};
+        if (ref $have ne "ARRAY") {
+            next unless %mine;
+            $d->{autoMode}{$key} = ["\$defaults", map { $mine{$_} } sort keys %mine]; $changed = 1; next;
+        }
+        my (@new, %seen);
+        for my $e (@$have) {
+            my $l = ref $e ? undef : $label->($e);
+            if (!defined $l) { push @new, $e; next }
+            if (!exists $mine{$l}) { $changed = 1; next }          # an entry a release dropped
+            $seen{$l} = 1; $changed = 1 if $e ne $mine{$l}; push @new, $mine{$l};
+        }
+        for my $l (sort keys %mine) { next if $seen{$l}; push @new, $mine{$l}; $changed = 1 }
+        $d->{autoMode}{$key} = \@new;
     }
     exit 0 unless $changed;
     my $mode = (stat $f)[2] & 07777;
     open(my $out, ">", "$f.ct-tmp") or die "write $f.ct-tmp: $!\n";
     print $out JSON::PP->new->pretty->canonical->encode($d); close $out;
     chmod $mode, "$f.ct-tmp"; rename "$f.ct-tmp", $f or die "rename: $!\n";
-    print STDERR "ct-install: git rules updated in $f (only destructive git asks)\n";
+    print STDERR "ct-install: autoMode in $f describes the ct workspace to the classifier\n";
 ' "$settings" "$srcdir/templates/claude-settings.json"
 done
 
