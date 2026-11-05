@@ -120,6 +120,24 @@ trusted remotes is refused unless the person asked for exactly that. To keep it 
   settings (`autoMode` in `~/.claude/settings.json`: what the site's remotes, clusters and registries are, and
   what is routine there), which a person reviews.
 
+## OpenCode asks before any path outside your workspace
+Auto mode, its classifier and the scratch guard are Claude Code's. OpenCode has none of them: inside your workspace
+it asks for nothing, `rm` included, and outside it it asks for everything. A workspace is not a git repo, so to
+OpenCode the workspace is the whole project. A tool that reads or edits a path outside it, or a bash command that
+names one, waits for the person (`external_directory`), for the path's whole directory. Symlinks are followed
+first, so a clone's `.env` counts as the root's. Most of these prompts here have been an agent's own mistake:
+
+- **Run a command in a clone by setting the bash tool's `workdir` to it, not with `cd <clone> && …`.** OpenCode
+  resolves a command's relative paths against `workdir` and ignores a `cd` inside the command. From the workspace,
+  `cd repo && cat ../x` is checked as `<root>/x`: a path in no workspace, which asks for the whole root. The command
+  then runs elsewhere than OpenCode checked.
+- **Name paths absolutely, or relative to `workdir`.** Never use `../` to reach out of the workspace. A sibling
+  clone is `<workspace>/<repo>`, not `../<repo>`.
+- **What asks is meant to ask:** the root's `.env` and `.kubeconfig`, `.profiles/`, `~/.config/opencode`, and every
+  other workspace. If you need one of them, say why, and the person answers the prompt. Nothing is allowed in
+  config, deliberately. OpenCode allows or asks for a whole directory and cannot tell reading from writing, so
+  allowing the root would also let every agent edit every other session's clones.
+
 ## Logins belong to a workspace or a profile — never the machine
 No login is machine-global. Two workspaces may work as two different accounts, and a login under `~/.config` is
 every agent's at once: one agent's `gcloud auth application-default login` silently changes whose identity every
