@@ -224,6 +224,10 @@ kubectl delete pod probe -n dev
 kubectl apply -f probe.yaml
 direnv exec . kubectl delete pod probe -n dev
 helm upgrade app chart
+helm template chart
+helm template chart --post-renderer ./run.sh
+kubectl kustomize --enable-alpha-plugins --enable-exec .
+kubectl config view --raw
 systemctl restart nginx
 rm -rf build
 NONE
@@ -233,7 +237,7 @@ NONE
 git add src/a.py
 kubectl get pods -n dev
 direnv exec . kubectl logs deploy/app -n dev
-helm template chart
+helm lint chart
 ALLOW
   [ "$(decide "rm -rf /")" = deny ]
 }
@@ -303,6 +307,28 @@ ALLOW
   jq -n --argjson ask "$released_ask" '{permissions: {ask: $ask, allow: ["Bash(git *)", "Read"]}}' > "$HOME/.claude/settings.json"
   "$REPO/install.sh" 2>/dev/null
   json 'join(",", @{$d->{permissions}{allow}}) eq "Bash(git *),Read"'
+}
+
+@test "three reads that can run a program or print credentials leave the allow list, and say so" {
+  mkdir -p "$HOME/.claude"
+  printf '%s\n' '{"permissions": {"allow": ["Bash(helm template:*)", "Bash(direnv exec . helm template:*)", "Bash(helm lint:*)",
+    "Bash(kubectl kustomize:*)", "Bash(direnv exec . kubectl kustomize:*)", "Bash(kubectl config view:*)",
+    "Bash(direnv exec . kubectl config view:*)", "Bash(kubectl get:*)", "Bash(helm template mychart)"]}}' > "$HOME/.claude/settings.json"
+  [ "$(decide "helm template chart --post-renderer ./run.sh")" = allow ]
+  [ "$(decide "kubectl config view --raw")" = allow ]
+  run "$REPO/install.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"retired 6 allow rule(s)"* ]]
+  [[ "$output" != *"ask rule(s)"* ]]
+  json 'join(",", @{$d->{permissions}{allow}}) eq "Bash(helm lint:*),Bash(kubectl get:*),Bash(helm template mychart)"'
+  [ "$(decide "helm template chart --post-renderer ./run.sh")" = none ]
+  [ "$(decide "kubectl kustomize --enable-exec .")" = none ]
+  [ "$(decide "kubectl config view --raw")" = none ]
+  [ "$(decide "helm template mychart")" = allow ]      # a rule its owner wrote, in another form, is kept
+  h1=$(sha256sum < "$HOME/.claude/settings.json")
+  run "$REPO/install.sh"
+  [[ "$output" != *"retired"* ]]
+  [ "$(sha256sum < "$HOME/.claude/settings.json")" = "$h1" ]
 }
 
 @test "every profile's settings lose the template's ask rules too" {

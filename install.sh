@@ -231,12 +231,27 @@ perl -MJSON::PP -e '
             $p->{allow} = \@allow; $changed = 1;
         }
     }
+    # Three reads the template allowed are not only reads: `helm template
+    # --post-renderer <program>` and `kubectl kustomize --enable-exec` run a
+    # program the caller chooses, and `kubectl config view --raw` prints
+    # credentials. An allow rule skips the classifier, so they go, as written
+    # and behind `direnv exec . `; the classifier then passes the plain forms.
+    my $reads = 0;
+    if (ref $p->{allow} eq "ARRAY") {
+        my %more = map { ("Bash($_)" => 1, "Bash(direnv exec . $_)" => 1) }
+            ("helm template:*", "kubectl kustomize:*", "kubectl config view:*");
+        my @allow = grep { !$more{$_} } @{ $p->{allow} };
+        $reads = @{ $p->{allow} } - @allow;
+        if ($reads) { $p->{allow} = \@allow; $changed = 1 }
+    }
     exit 0 unless $changed;
     my $mode = (stat $f)[2] & 07777;
     open(my $out, ">", "$f.ct-tmp") or die "write $f.ct-tmp: $!\n";
     print $out JSON::PP->new->pretty->canonical->encode($d); close $out;
     chmod $mode, "$f.ct-tmp"; rename "$f.ct-tmp", $f or die "rename: $!\n";
-    print STDERR "ct-install: retired $gone ask rule(s) of the template in $f (auto mode decides; rules you added are kept)\n";
+    print STDERR "ct-install: retired $gone ask rule(s) of the template in $f (auto mode decides; rules you added are kept)\n" if $gone;
+    print STDERR "ct-install: allow of git whole replaced by git add in $f\n" if $git_whole && !$gone;
+    print STDERR "ct-install: retired $reads allow rule(s) in $f that can run a program or print credentials (helm template, kubectl kustomize, kubectl config view)\n" if $reads;
 ' "$settings" "$srcdir/templates/retired-ask-rules.txt"
 
 # --- 3f. the classifier is told what a ct workspace is -----------------------
