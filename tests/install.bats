@@ -165,6 +165,15 @@ guard_cmd() { printf "'%s' '%s'" "$CT_PREFIX/ct-scratch-guard" "$CT_HOME"; }
   grep -q 'hook itself never asks' "$CT_HOME/CLAUDE.md"
 }
 
+# A refused agent that reports "it was refused, please approve" gets "continue" back, which clears
+# nothing. The reply has to name what the refusing rule asks for, so the agent writes it.
+@test "the conventions block tells agents to hand over the reply that clears a refusal" {
+  "$REPO/install.sh" 2>/dev/null
+  grep -q 'Hand over the reply itself' "$CT_HOME/CLAUDE.md"
+  grep -q 'claude auto-mode defaults --label' "$CT_HOME/CLAUDE.md"
+  grep -q 'a change of mode to let one action through makes every command after it prompt' "$CT_HOME/CLAUDE.md"
+}
+
 @test "every profile's Claude settings get the scratch guard and plansDirectory, not only ~/.claude" {
   mkdir -p "$CT_HOME/.profiles/acme/claude" "$CT_HOME/.profiles/gw/claude"
   echo '{"model":"m"}' > "$CT_HOME/.profiles/acme/claude/settings.json"
@@ -467,6 +476,7 @@ ALLOW
 
 ct_env()   { jq -r '.autoMode.environment[] | select(startswith("**Workspace layout (ct)**:"))' "$1"; }
 ct_allow() { jq -r '.autoMode.allow[] | select(startswith("Workspace Scratch Cleanup (ct):"))' "$1"; }
+ct_amend() { jq -r '.autoMode.allow[] | select(startswith("Own Unpushed Commits (ct):"))' "$1"; }
 
 @test "a fresh install describes the workspace to the classifier and keeps Claude Code's own entries" {
   "$REPO/install.sh" 2>/dev/null
@@ -474,6 +484,8 @@ ct_allow() { jq -r '.autoMode.allow[] | select(startswith("Workspace Scratch Cle
   jq -e '.autoMode.environment[0] == "$defaults" and .autoMode.allow[0] == "$defaults"' "$s"
   [[ "$(ct_env "$s")" == *"is not itself a git repository"* ]]
   [[ "$(ct_allow "$s")" == *".scratch/"* ]]
+  # the amend of an own commit whose `git commit` a long conversation no longer shows; never a force-push
+  [[ "$(ct_amend "$s")" == *"git commit --amend"* && "$(ct_amend "$s")" == *"does NOT cover any force-push"* ]]
   jq -e '.autoMode | has("soft_deny") | not' "$s"      # ct blocks nothing more, and unblocks nothing
   jq -e '.autoMode.classifyAllShell == true' "$s"
 }
@@ -499,7 +511,7 @@ ct_allow() { jq -r '.autoMode.allow[] | select(startswith("Workspace Scratch Cle
   "$REPO/install.sh" 2>/dev/null
   s="$HOME/.claude/settings.json"
   jq -e '(.autoMode.environment | length) == 2 and .autoMode.environment[0] == "$defaults"' "$s"
-  jq -e '(.autoMode.allow | length) == 2 and .autoMode.allow[0] == "$defaults"' "$s"
+  jq -e '(.autoMode.allow | length) == 3 and .autoMode.allow[0] == "$defaults"' "$s"
   h1=$(sha256sum < "$s"); "$REPO/install.sh" 2>/dev/null; [ "$(sha256sum < "$s")" = "$h1" ]
 }
 
@@ -529,6 +541,22 @@ ct_allow() { jq -r '.autoMode.allow[] | select(startswith("Workspace Scratch Cle
   jq -e '.autoMode.environment | map(select(test("\\(ct\\)"))) | length == 1' "$s"
   jq -e '.autoMode.environment | index("**Organization**: Acme")' "$s"
   jq -e '.autoMode.environment[0] == "$defaults" and .autoMode.environment[1] == (.autoMode.environment | map(select(test("^\\*\\*Workspace layout"))) | .[0])' "$s"
+}
+
+@test "an entry a release adds reaches settings that hold the earlier ones, beside the site's" {
+  mkdir -p "$HOME/.claude"
+  "$REPO/install.sh" 2>/dev/null
+  s="$HOME/.claude/settings.json"
+  # the file as the release before left it, with a site's entry after ct's
+  jq '.autoMode.allow |= (map(select(startswith("Own Unpushed Commits (ct):") | not)) + ["Cluster Reads (site): reads are routine"])' "$s" > "$s.new"
+  mv "$s.new" "$s"
+  [[ -z "$(ct_amend "$s")" ]]
+  run "$REPO/install.sh"
+  [[ "$output" == *"the ct workspace is described to it"* ]]
+  [[ "$(ct_amend "$s")" == *"git commit --amend"* ]]
+  jq -e '.autoMode.allow | index("Cluster Reads (site): reads are routine")' "$s"
+  jq -e '.autoMode.allow | map(select(test("\\(ct\\):"))) | length == 2' "$s"
+  h1=$(sha256sum < "$s"); "$REPO/install.sh" 2>/dev/null; [ "$(sha256sum < "$s")" = "$h1" ]
 }
 
 @test "an autoMode list that is not a list is left as it is, and said" {

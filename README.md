@@ -53,8 +53,19 @@ weeks on one machine with nineteen agents: 1898 permission prompts, 5 of them re
   the rules the owner added, and any they add afterwards. `ct-scratch-guard` stays silent where it used to ask.
 - **What ct does about the second.** A conversation left in accept-edits or manual mode is resumed in the
   settings' `permissions.defaultMode`. Plan mode is kept, and so is the caller's own `--permission-mode`.
-  The conventions tell agents what to do when auto mode refuses: name the action and the reply that
+  The conventions tell agents what to do when auto mode refuses: name the action, write out the reply that
   authorises it, and never ask for a change of mode.
+- **What is still refused.** Over thirty days on that machine the classifier let 48,048 actions through and
+  refused 81, under three a day. Most were what a person should decide: writes into live systems,
+  permission grants, deploys, a flag that skips a review. A refusal costs little by itself. What cost was the
+  answer to it: the person switched the session out of auto mode to let the one action through, and the
+  forty minutes it stayed there raised 54 prompts. A reply that names the action lifts an ordinary refusal
+  with the session still in auto mode, so the agent writes that reply out, with what the refusing rule says
+  it must name (`claude auto-mode defaults --label "<rule>"`).
+- **What ct tells the classifier.** Refusals that were wrong came in few kinds, and a kind is fixed by saying
+  what is true of the place. ct says what is true of a workspace: what it is, that its `.scratch/` is the
+  agent's to clean, and that an unpushed commit in the agent's own clone is the agent's to amend, also when
+  a long conversation no longer shows the `git commit` that made it.
 - **What a site adds.** `autoMode.environment` in the same file describes the site to the classifier: its
   organisation, source-control hosts, clusters, registries, what counts as production. ct owns only the
   entries labelled `(ct)`, which describe the workspace layout, and leaves every other entry alone. See
