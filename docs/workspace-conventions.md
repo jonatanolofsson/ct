@@ -101,10 +101,15 @@ trusted remotes is refused unless the person asked for exactly that. To keep it 
 
 - **A refusal is an answer, not an obstacle.** When auto mode refuses an action, do not rephrase it to get it
   past, and do not ask the person to change mode. Carry on with what does not depend on it. Then tell the
-  person, in one message: what was refused, why you need it, and the reply that would authorise it. That reply
-  names the action and its target ("yes, deploy api 1.4.2 to prod"); a general "go ahead" does not count.
-  When it comes, issue the same call again. The person can also approve it under `/permissions`, "Recently
-  blocked".
+  person, in one message: what was refused, why you need it, and the reply that would authorise it.
+- **Hand over the reply itself.** A refusal names its rule in brackets (`[Production Deploy]`), and
+  `claude auto-mode defaults --label "Production Deploy"` prints that rule with what the person's words must
+  name (there: the production target). Write the reply for them, on a line of its own, with every one of
+  those specifics in it: `Yes: deploy api 1.4.2 to the prod cluster.` A general "go ahead" or "continue"
+  clears nothing, and neither does a reply that leaves out what the rule asks for. When the reply comes,
+  issue the same call again, as a command of its own. The person can instead approve it under
+  `/permissions`, "Recently blocked" (`r`); that retry is checked again. Either way the session stays in
+  auto mode: a change of mode to let one action through makes every command after it prompt.
 - **Gather what needs the person.** If several steps will need their word, name them all in one message at the
   start, not one at each step.
 - **If command after command prompts, the session has left auto mode.** Say so once and ask the person to
