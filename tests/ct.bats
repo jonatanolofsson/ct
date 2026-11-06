@@ -631,3 +631,158 @@ envrc_claude() {
   ( cd "$HOME/dev/agent-alpha" && CT_PROFILE=acme "$REPO/bin/ct" )
   [[ "$(envrc_adc "$HOME/dev/agent-alpha")" == "$HOME/dev/.profiles/acme/gcloud/application_default_credentials.json" ]]
 }
+
+
+# --- a resumed conversation comes back in the settings' permission mode -------
+# Claude restores the mode a conversation was left in, so one switched to
+# accept-edits to approve a single action prompted for every command from then
+# on, across restarts (one agent: ten days and counting).
+
+left_in() { # workspace, session-id, mode...: a transcript whose permission-mode records end with the last one
+  local key sid="$2" m; key="$HOME/.claude/projects/$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-')"
+  mkts "$1" "$sid" 200
+  shift 2
+  for m in "$@"; do
+    printf '{"type":"permission-mode","permissionMode":"%s","sessionId":"x"}\n' "$m" >> "$key/$sid.jsonl"
+  done
+}
+default_mode() { mkdir -p "$HOME/.claude"; printf '{\n  "permissions" : {\n    "defaultMode" : "%s"\n  }\n}\n' "$1" > "$HOME/.claude/settings.json"; }
+# `! grep` in the middle of a bats test never fails it: these do.
+passed_mode()    { grep -q -- "--permission-mode $1 " "$TMUX_STUB_LOG" || { echo "expected --permission-mode $1 in: $(cat "$TMUX_STUB_LOG")"; return 1; }; }
+no_mode_passed() { if grep -q -- '--permission-mode' "$TMUX_STUB_LOG"; then echo "unexpected --permission-mode in: $(cat "$TMUX_STUB_LOG")"; return 1; fi; }
+resumed()        { grep -q -- "--resume $1" "$TMUX_STUB_LOG" || { echo "not resumed: $(cat "$TMUX_STUB_LOG")"; return 1; }; }
+again()          { : > "$TMUX_STUB_LOG"; : > "$TMUX_STUB_SESSIONS"; }
+
+@test "a conversation left in accept-edits or manual mode resumes in the settings' default mode" {
+  default_mode auto
+  left_in "$HOME/dev/agent-alpha" "aaaaaaaa-1111" auto plan acceptEdits
+  run run_ct "$HOME/dev/agent-alpha"
+  [[ $status -eq 0 ]]
+  [[ $output == *"left in acceptEdits mode; resuming it in auto"* ]]
+  grep -q -- '--resume aaaaaaaa-1111 --permission-mode auto ' "$TMUX_STUB_LOG"
+
+  again
+  left_in "$HOME/dev/agent-alpha" "aaaaaaaa-1111" auto default
+  run run_ct "$HOME/dev/agent-alpha"
+  [[ $output == *"left in manual mode; resuming it in auto"* ]]
+  passed_mode auto
+}
+
+@test "a conversation left in auto or in plan mode is resumed as it was" {
+  default_mode auto
+  left_in "$HOME/dev/agent-alpha" "aaaaaaaa-1111" acceptEdits auto
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  resumed aaaaaaaa-1111
+  no_mode_passed
+
+  again
+  left_in "$HOME/dev/agent-alpha" "aaaaaaaa-1111" auto plan     # someone parked it: it stays parked
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  resumed aaaaaaaa-1111
+  no_mode_passed
+}
+
+@test "without a default mode in the settings, or with CT_KEEP_MODE, the mode is not touched" {
+  left_in "$HOME/dev/agent-alpha" "aaaaaaaa-1111" acceptEdits
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )                       # no settings.json at all
+  resumed aaaaaaaa-1111
+  no_mode_passed
+
+  again
+  mkdir -p "$HOME/.claude"; echo '{"permissions":{"allow":["Read"]}}' > "$HOME/.claude/settings.json"
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )                       # settings that name no mode
+  resumed aaaaaaaa-1111
+  no_mode_passed
+
+  again
+  default_mode auto
+  ( cd "$HOME/dev/agent-alpha" && CT_KEEP_MODE=1 "$REPO/bin/ct" )
+  resumed aaaaaaaa-1111
+  no_mode_passed
+
+  again                                                                   # the control: the same state does pass it
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  passed_mode auto
+}
+
+@test "the caller's own --permission-mode wins over the settings' default" {
+  default_mode auto
+  left_in "$HOME/dev/agent-alpha" "aaaaaaaa-1111" acceptEdits
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" --permission-mode plan )
+  grep -q -- '--permission-mode plan' "$TMUX_STUB_LOG"
+  [ "$(grep -o -- '--permission-mode' "$TMUX_STUB_LOG" | wc -l)" -eq 1 ]
+}
+
+@test "settings that name manual mode, in either spelling, pass it as the command line spells it" {
+  default_mode default
+  left_in "$HOME/dev/agent-alpha" "aaaaaaaa-1111" acceptEdits
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  passed_mode manual
+
+  again
+  default_mode manual
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  passed_mode manual
+
+  again                                    # left in manual, settings say manual: nothing to change, nothing said
+  left_in "$HOME/dev/agent-alpha" "aaaaaaaa-1111" default
+  run run_ct "$HOME/dev/agent-alpha"
+  [[ $output != *"left in"* ]]
+  no_mode_passed
+}
+
+@test "a workspace that names its own default mode is left to it" {
+  default_mode auto
+  left_in "$HOME/dev/agent-alpha" "aaaaaaaa-1111" acceptEdits
+  mkdir -p "$HOME/dev/agent-alpha/.claude"
+  echo '{"permissions":{"defaultMode":"acceptEdits"}}' > "$HOME/dev/agent-alpha/.claude/settings.json"
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  resumed aaaaaaaa-1111
+  no_mode_passed
+
+  again
+  rm "$HOME/dev/agent-alpha/.claude/settings.json"
+  echo '{"permissions":{"defaultMode":"acceptEdits"}}' > "$HOME/dev/agent-alpha/.claude/settings.local.json"
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  no_mode_passed
+}
+
+@test "settings that name the mode twice are not guessed at" {
+  mkdir -p "$HOME/.claude"
+  echo '{"permissions":{"defaultMode":"auto"},"other":{"defaultMode":"plan"}}' > "$HOME/.claude/settings.json"
+  left_in "$HOME/dev/agent-alpha" "aaaaaaaa-1111" acceptEdits
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  resumed aaaaaaaa-1111
+  no_mode_passed
+}
+
+@test "a conversation Claude holds as a background job is resumed without the flag" {
+  default_mode auto
+  left_in "$HOME/dev/agent-alpha" "aaaaaaaa-1111-2222" acceptEdits
+  mkdir -p "$HOME/.claude/jobs/aaaaaaaa"     # `claude --resume` attaches to it, and exits if given --permission-mode
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  resumed aaaaaaaa-1111-2222
+  no_mode_passed
+}
+
+@test "a transcript with no permission-mode record still resumes" {
+  default_mode auto
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200
+  run run_ct "$HOME/dev/agent-alpha"
+  [[ $status -eq 0 ]]
+  resumed aaaaaaaa-1111
+  no_mode_passed
+}
+
+@test "a profile workspace takes the default mode from the profile's settings" {
+  ( cd "$HOME/dev/agent-alpha" && CT_PROFILE=acme CT_FRESH=1 "$REPO/bin/ct" )
+  again
+  cfg="$HOME/dev/.profiles/acme/claude"
+  key="$cfg/projects/$(printf '%s' "$HOME/dev/agent-alpha" | tr -c 'A-Za-z0-9' '-')"
+  mkdir -p "$key"; for _ in $(seq 60); do echo '{"type":"user"}'; done > "$key/pppppppp-1111.jsonl"
+  echo '{"type":"permission-mode","permissionMode":"acceptEdits","sessionId":"x"}' >> "$key/pppppppp-1111.jsonl"
+  echo '{"permissions":{"defaultMode":"auto"}}' > "$cfg/settings.json"
+  default_mode plan                                    # the machine's settings must not be the ones read
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  grep -q -- '--resume pppppppp-1111 --permission-mode auto ' "$TMUX_STUB_LOG"
+}

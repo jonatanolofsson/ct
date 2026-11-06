@@ -86,10 +86,39 @@ sessions share:
   add a section about your own work.
 - **Scratch files** go in `<workspace>/.scratch/`. Delete your own when you are finished with them. A file
   someone else deletes mid-use, or a directory a reboot wipes (`/tmp`), is lost work, not cleanup.
-- **Delete scratch files with a plain `rm` and literal paths** (`rm -f <workspace>/.scratch/x.json`). That runs
-  without a prompt: ct registers `ct-scratch-guard`, a hook that allows `rm` only inside a workspace's
-  `.scratch/`. Any other `rm` asks, and so does an `rm` it cannot check: one with a variable, a glob, `$(…)`,
-  `sudo`, or a relative path after a `cd`.
+- **Delete scratch files with a plain `rm` and literal paths, as a command of its own**
+  (`rm -f <workspace>/.scratch/x.json`). That runs without a prompt: ct registers `ct-scratch-guard`, a hook
+  that allows a command when all it does is `rm` inside a workspace's `.scratch/`. Its allow is for the whole
+  command, so it gives none when anything else rides along (`rm … && git push`, a pipe, a redirect to a file),
+  or when it cannot check a path: a variable, a glob, `$(…)`, `sudo`. Those, and every other `rm`, it leaves to
+  the normal decision (next section); the hook itself never asks.
+
+## Nobody is there to approve: work so that nothing has to be
+The person is usually away, and a call that waits for them can wait for hours. So the permission set-up ct
+installs asks for nothing by rule. Every agent starts in **auto mode**, where a classifier reads each action
+and settles it at once: routine work runs, and what destroys work, touches production or sends data outside the
+trusted remotes is refused unless the person asked for exactly that. To keep it that way:
+
+- **A refusal is an answer, not an obstacle.** When auto mode refuses an action, do not rephrase it to get it
+  past, and do not ask the person to change mode. Carry on with what does not depend on it. Then tell the
+  person, in one message: what was refused, why you need it, and the reply that would authorise it. That reply
+  names the action and its target ("yes, deploy api 1.4.2 to prod"); a general "go ahead" does not count.
+  When it comes, issue the same call again. The person can also approve it under `/permissions`, "Recently
+  blocked".
+- **Gather what needs the person.** If several steps will need their word, name them all in one message at the
+  start, not one at each step.
+- **If command after command prompts, the session has left auto mode.** Say so once and ask the person to
+  switch back (shift+tab, or the mode picker), instead of having each command approved. The usual cause:
+  someone changed mode to let one action through, and the mode stayed. ct brings a conversation left in
+  accept-edits or manual mode back in the settings' `defaultMode` at its next start (`CT_KEEP_MODE=1` keeps it).
+- **Write commands the classifier can read.** A delete names literal paths (`rm -rf <workspace>/.scratch/run1`),
+  not a variable set in an earlier call or a pattern over a shared directory: the classifier cannot see what
+  such a target expands to, and refuses. A destructive step is its own command, not a line inside a long script.
+- **Do not add `ask` rules,** and do not allow a whole tool (`Bash(git *)`, an interpreter, a task runner) to
+  quieten a prompt: an allow rule skips the classifier for everything it matches. When one kind of call is
+  refused or prompted again and again, report the call and the reason given. The fix belongs in the auto-mode
+  settings (`autoMode` in `~/.claude/settings.json`: what the site's remotes, clusters and registries are, and
+  what is routine there), which a person reviews.
 
 ## Logins belong to a workspace or a profile — never the machine
 No login is machine-global. Two workspaces may work as two different accounts, and a login under `~/.config` is

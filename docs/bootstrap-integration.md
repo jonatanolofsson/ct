@@ -47,6 +47,53 @@ written as a SECOND, independent marker block after it:
 Two blocks, two owners: the ct installer never touches your site block, your
 bootstrap never touches the ct block, and hand edits outside both survive.
 
+## Tell the classifier what your site is
+
+Agents run in auto mode, where a classifier decides each action from a
+description of the environment. Out of the box it knows nothing of yours:
+every remote, registry and cluster is foreign, and it refuses work that is
+routine for you. Each refusal waits for a person, and a person who switches
+the session out of auto mode to let it through gets a prompt for every
+command after that.
+
+Describe the site in `autoMode` of `~/.claude/settings.json` (and of each
+profile's `settings.json`). Claude Code reads it from user settings only, never
+from a repository's `.claude/settings.json`:
+
+    "autoMode": {
+      "environment": [
+        "$defaults",
+        "**Organization**: Example Corp",
+        "**Source control**: git.example.internal/platform and github.com/example-org; pushes to their default branches are how work lands",
+        "**Trusted internal domains**: *.example.internal",
+        "**Internal package registry**: registry.example.internal",
+        "**Protected deployment namespaces / environments**: namespaces named *-prod on cluster-a; every other namespace there is development"
+      ],
+      "allow": [
+        "$defaults",
+        "Throwaway Probes: creating and deleting a pod, job or configmap the agent itself named as a probe ..."
+      ]
+    }
+
+- Keep `"$defaults"` first in every list you write. A list without it replaces
+  Claude Code's own entries, the block rules included.
+- Leave `autoMode.classifyAllShell` on (ct sets it where the key is absent). It
+  sends every shell command to the classifier while auto mode is active, so an
+  allow rule someone added with "don't ask again" (`Bash(direnv exec *)`) cannot
+  pass a command the classifier never saw. Your `allow` entries above are what
+  spare routine work a refusal, not allow rules.
+- `environment` states facts; `allow` states what is routine at your site. Both
+  are read by a model, so write whole sentences and say what an entry does not
+  cover.
+- ct owns the entries labelled `(ct)` (the workspace layout, scratch cleanup):
+  the installer adds, rewords and removes those, and leaves every other entry
+  as it is. Your bootstrap owns the rest, the same way the two CLAUDE.md
+  blocks have two owners.
+- `claude auto-mode config` prints what is in effect, `claude auto-mode
+  defaults` what ships, and `claude auto-mode critique` reviews your entries.
+- Do not answer a refusal with an `ask` rule or a wide `allow` rule. The first
+  prompts every time; the second skips the classifier for all it matches.
+
 ## Autostart at boot
 
 `ct-autostart` is opt-in per user (`touch ~/.ct-autostart`; kill switch

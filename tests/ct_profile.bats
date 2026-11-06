@@ -24,6 +24,22 @@ setup() {
   [ "$(stat -c %a "$P/acme/claude/settings.json")" = 600 ]
 }
 
+@test "a new profile takes the machine's migration record with its settings" {
+  # The machine's file has been through the installer; its owner then put one retired rule back.
+  export CT_HOME="$HOME/dev" CT_PREFIX="$HOME/bin"
+  echo '{"permissions":{"ask":["Bash(kill*)","Bash(kubectl delete*)"]}}' > "$HOME/.claude/settings.json"
+  "$REPO/install.sh" 2>/dev/null
+  jq -e '.permissions | has("ask") | not' "$HOME/.claude/settings.json"
+  jq '.permissions.ask = ["Bash(kubectl delete*)"]' "$HOME/.claude/settings.json" > "$BATS_TEST_TMPDIR/s" && cp "$BATS_TEST_TMPDIR/s" "$HOME/.claude/settings.json"
+  "$REPO/bin/ct-profile" claude acme
+  grep -qxF "retire-shipped-rules-1" "$P/acme/claude/.ct-migrations"
+  # The next install must not take the rule out of the profile's copy.
+  run "$REPO/install.sh"
+  [ "$status" -eq 0 ]
+  jq -e '.permissions.ask == ["Bash(kubectl delete*)"]' "$P/acme/claude/settings.json"
+  jq -e '.permissions.ask == ["Bash(kubectl delete*)"]' "$HOME/.claude/settings.json"
+}
+
 @test "a bedrock profile merges the site's settings and marks itself bedrock" {
   echo '{"apiKeyHelper":"cat ~/.key","env":{"ANTHROPIC_BASE_URL":"https://gw.example"}}' > "$BATS_TEST_TMPDIR/site.json"
   run env CT_BEDROCK_SETTINGS="$BATS_TEST_TMPDIR/site.json" "$REPO/bin/ct-profile" claude work bedrock

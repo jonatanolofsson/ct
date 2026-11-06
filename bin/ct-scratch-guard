@@ -1,24 +1,43 @@
 #!/usr/bin/env perl
 # ct-scratch-guard — Claude Code PreToolUse hook (Bash):
-#   `rm` inside a workspace .scratch/ runs unprompted; every other `rm` asks.
+#   a command that does nothing but delete inside a workspace .scratch/ is
+#   allowed without a prompt. It never asks and never denies.
 #
 #   ct-scratch-guard <workspace-root>      (install.sh registers it with CT_HOME)
 #
-# Why a hook and not permission rules: an `ask` rule is evaluated whatever a
-# hook returns, and no rule syntax can say "rm, but only under .scratch". The
-# conventions tell every agent to delete its own scratch files
-# (docs/workspace-conventions.md), and with `ask: Bash(rm *)` each deletion
-# prompted. So that rule leaves the settings and this hook carries the policy:
+# The conventions tell every agent to delete its own scratch files
+# (docs/workspace-conventions.md). Outside auto mode an `rm` prompts unless
+# something allows it, and no rule syntax can say "rm, but only under .scratch",
+# so this hook says it:
 #
-#   no rm in the command                       -> no output (normal permission flow)
-#   every rm touches only <root>/<ws>/.scratch/<something>   -> "allow"
-#   any other rm                               -> "ask" (as the rule did, auto mode too)
+#   the WHOLE command is `rm`s, each touching only <root>/<ws>/.scratch/<something>   -> "allow"
+#   anything else, and anything it cannot prove                                        -> no output
 #
-# Doubt always means ask: variables, globs, $(...), backticks, sudo, an
-# unparseable command, `.scratch` itself, a path leaving .scratch via `..` or a
-# symlinked directory, a relative path after `cd`. Deny rules still win. If the
-# hook itself fails, Claude Code's normal flow runs, which prompts for rm: the
-# failure mode is the old prompt, never a silent deletion.
+# No output means Claude Code's normal flow decides: in auto mode the classifier
+# (it refuses a delete of files the session did not make, a delete whose target
+# it cannot see, a sweep of a shared directory), in the other modes a prompt.
+#
+# WHOLE, because a hook's "allow" is for the entire Bash call, not for the part
+# the hook looked at. `rm <scratch file> && git push --force` is one call: an
+# allow for its rm would be an allow for its push. Until 0.12 the guard judged
+# only the rm segments and skipped every other, which was harmless while ask
+# rules still prompted for the rest and stopped being so when they were retired
+# (found in review, before release). So the command may hold `rm` commands
+# joined by `;` or `&&`, their output sent to /dev/null, and nothing else: no
+# other command, no pipe, no redirection to a file, no `$`, no backtick, no
+# subshell, no background `&`.
+#
+# Until 0.12 it also answered "ask" where it now stays silent. A hook's "ask"
+# forces a prompt and takes the decision away from the classifier, and "cannot
+# prove" was most of what agents write: `cd dir && rm x`, an `rm` in a command
+# that also holds `$(…)`, a heredoc whose text mentions rm. In the ten days
+# after it was installed on one machine it raised 210 prompts, and the person
+# refused one.
+#
+# Doubt is never "allow": variables, globs, sudo, an unparseable command,
+# `.scratch` itself, a path leaving .scratch via `..` or a symlinked directory.
+# Deny rules still win, and in plan mode Claude Code ignores a hook's allow for
+# anything that writes. If the hook itself fails, the normal flow runs.
 #
 # perl with core modules only (JSON::PP, Text::ParseWords, Cwd), because jq and
 # python3 are not on every base image ct installs onto.
@@ -40,29 +59,32 @@ my $cmd = $in->{tool_input}{command} // '';
 my $cwd = $in->{cwd} // '';
 exit 0 unless length $cmd;
 
-sub emit {
-    my ($decision, $reason) = @_;
+sub allow {
     print encode_json({ hookSpecificOutput => {
         hookEventName => 'PreToolUse',
-        permissionDecision => $decision,
-        permissionDecisionReason => $reason } }), "\n";
+        permissionDecision => 'allow',
+        permissionDecisionReason => 'nothing but rm inside a workspace .scratch/' } }), "\n";
     exit 0;
 }
+# Not provably scratch deletion and nothing else: say nothing, and the normal permission flow decides.
+sub pass { exit 0 }
 
 # Does the command involve rm at all? (a word; rmdir is not rm)
-exit 0 unless $cmd =~ m{(?:^|[^\w./-])\\?(?:/usr)?(?:/bin/)?rm(?:\s|$)};
+pass() unless $cmd =~ m{(?:^|[^\w./-])\\?(?:/usr)?(?:/bin/)?rm(?:\s|$)};
 
-# rm next to a substitution cannot be inspected: ask (the old rule did too).
-emit('ask', 'rm together with a command substitution: confirm')
-    if $cmd =~ /\$\(|`|<\(|>\(/;
+# Output sent nowhere is the one redirection it accepts: take those words out.
+my $c = $cmd;
+$c =~ s{(?:^|(?<=\s))(?:[12]?>\s*/dev/null|&>\s*/dev/null|2>&1)(?=\s|;|&&|$)}{ }g;
 
-my $has_cd = ($cmd =~ /(?:^|[;&|(\s])(?:cd|pushd|popd)(?:\s|$)/) ? 1 : 0;
+# What is left may hold words, quotes, `;` and `&&`. Anything that redirects,
+# pipes, substitutes, groups, escapes or continues a line is not provable.
+pass() if $c =~ /[<>|`\$(){}\\\n]/;
 
 sub in_scratch {    # one path argument -> true if strictly inside <root>/<ws>/.scratch/
     my ($p) = @_;
-    return 0 if $p =~ /[*?\[{]/ || $p =~ /^~/;
-    if ($p !~ m{^/}) {                                   # relative
-        return 0 if $has_cd || !length $cwd;
+    return 0 if $p =~ /[*?\[]/ || $p =~ /^~/;
+    if ($p !~ m{^/}) {                                   # relative: against the session's directory
+        return 0 unless length $cwd;
         $p = "$cwd/$p";
     }
     my $base = basename($p);
@@ -79,32 +101,29 @@ sub in_scratch {    # one path argument -> true if strictly inside <root>/<ws>/.
 }
 
 my $found = 0;
-for my $seg (split /\|\||&&|;|\||&|\n/, $cmd) {
-    $seg =~ s/^[\s({]+//;
-    next unless length $seg;
+for my $seg (split /&&|;/, $c) {
+    $seg =~ s/^\s+|\s+$//g;
+    next unless length $seg;                              # a trailing `;`
+    pass() if $seg =~ /&/;                                # a background `&`, or half of something else
     my @t = shellwords($seg);
-    emit('ask', 'rm with a command line I cannot parse: confirm') unless @t;
+    pass() unless @t;                                     # a command line it cannot parse
     my $i;
-    my $w = $t[0];
-    if ($w =~ m{^\\?(?:/usr)?(?:/bin/)?rm$}) { $i = 0 }
-    elsif ($w =~ /^(?:command|env|nice|time|builtin)$/) { next unless ($t[1] // '') eq 'rm'; $i = 1 }
-    elsif ($w =~ /^(?:sudo|doas)$/) { emit('ask', 'rm as root: confirm') if grep { $_ eq 'rm' } @t; next }
-    elsif ($w eq 'direnv') { next unless ($t[1] // '') eq 'exec' && ($t[3] // '') eq 'rm'; $i = 3 }
-    else { next }                                         # rm only as a word in another command
+    if ($t[0] =~ m{^(?:/usr)?(?:/bin/)?rm$}) { $i = 0 }
+    elsif ($t[0] eq 'command' && ($t[1] // '') eq 'rm') { $i = 1 }
+    elsif ($t[0] eq 'direnv' && ($t[1] // '') eq 'exec' && ($t[3] // '') eq 'rm') { $i = 3 }
+    else { pass() }                                       # any other command: the allow would cover it too
     $found = 1;
-    emit('ask', 'rm with a variable in its arguments: confirm') if $seg =~ /\$/;
-    my $paths = 0;
+    my ($paths, $only_paths) = (0, 0);
     for my $a (@t[$i + 1 .. $#t]) {
-        next if $a eq '--';
-        next if $a =~ /^(?:\d*[<>]|\d+$)/;                  # redirections: 2>/dev/null, the 1 of 2>&1
-        if ($a =~ /^-/) {
+        if (!$only_paths && $a eq '--') { $only_paths = 1; next }
+        if (!$only_paths && $a =~ /^-/) {
             next if $a =~ /^-[rRfiv]+$/ || $a =~ /^--(?:force|recursive|verbose|interactive=never)$/;
-            emit('ask', "rm with option '$a': confirm");
+            pass();                                       # an option it does not know
         }
-        emit('ask', 'rm outside a workspace .scratch/: confirm') unless in_scratch($a);
+        pass() unless in_scratch($a);
         $paths++;
     }
-    emit('ask', 'rm without a path: confirm') unless $paths;
+    pass() unless $paths;
 }
-emit('allow', 'rm only inside a workspace .scratch/') if $found;
+allow() if $found;
 exit 0;
