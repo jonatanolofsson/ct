@@ -53,8 +53,10 @@ weeks on one machine with nineteen agents: 1898 permission prompts, 5 of them re
   the rules the owner added, and any they add afterwards. `ct-scratch-guard` stays silent where it used to ask.
 - **What ct does about the second.** A conversation left in accept-edits or manual mode is resumed in the
   settings' `permissions.defaultMode`. Plan mode is kept, and so is the caller's own `--permission-mode`.
-  The conventions tell agents what to do when auto mode refuses: name the action, write out the reply that
-  authorises it, and never ask for a change of mode.
+  The conventions tell agents what to do when auto mode refuses: ask with a question prompt whose yes
+  option names the action and everything the refusing rule wants named, so the person clicks instead of
+  typing, and never ask for a change of mode. A selected option lifts the refusal like a typed reply
+  (tried on Claude Code 2.1.319: a remote branch deletion refused twice went through after one click).
 - **What is still refused.** Over thirty days on that machine the classifier let 48,048 actions through and
   refused 81, under three a day. Most were what a person should decide: writes into live systems,
   permission grants, deploys, a flag that skips a review. A refusal costs little by itself. What cost was the

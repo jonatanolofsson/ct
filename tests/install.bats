@@ -166,10 +166,13 @@ guard_cmd() { printf "'%s' '%s'" "$CT_PREFIX/ct-scratch-guard" "$CT_HOME"; }
 }
 
 # A refused agent that reports "it was refused, please approve" gets "continue" back, which clears
-# nothing. The reply has to name what the refusing rule asks for, so the agent writes it.
-@test "the conventions block tells agents to hand over the reply that clears a refusal" {
+# nothing. The approval has to name what the refusing rule asks for, so the agent puts it in a question
+# the person clicks, and writes it out only where no question can be asked.
+@test "the conventions block tells agents to ask for the approval that clears a refusal" {
   "$REPO/install.sh" 2>/dev/null
-  grep -q 'Hand over the reply itself' "$CT_HOME/CLAUDE.md"
+  grep -q 'Ask with a question the person clicks' "$CT_HOME/CLAUDE.md"
+  grep -q 'AskUserQuestion' "$CT_HOME/CLAUDE.md"
+  grep -q 'write that sentence out on a line of its own instead' "$CT_HOME/CLAUDE.md"
   grep -q 'claude auto-mode defaults --label' "$CT_HOME/CLAUDE.md"
   grep -q 'a change of mode to let one action through makes every command after it prompt' "$CT_HOME/CLAUDE.md"
 }
