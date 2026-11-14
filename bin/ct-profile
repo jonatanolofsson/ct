@@ -84,6 +84,8 @@ move() { # workspace name [--own-accounts]
       id="$(basename "$f" .jsonl)"; n=$((n + 1))
       if grep -q '"type":"bridge-session"' "$f"; then linked=$((linked + 1)); fi
       copy_history "$id" "$id" "$name"
+      copy_uploads "$id" "$id" "$name"
+      sed -i "$(upload_paths "$id" "$id" "$name")" "$f"
     done
     echo "ct-profile: copied $n conversation(s) into $name" >&2
     if (( linked > 0 )); then
@@ -100,11 +102,13 @@ move() { # workspace name [--own-accounts]
   for f in "$from"/*.jsonl; do
     [[ -e $f ]] || continue
     id="$(basename "$f" .jsonl)"; new="$(new_id)"; n=$((n + 1))
-    grep -v -e '"type":"bridge-session"' -e '"type":"history-suppression"' "$f" | sed "s/$id/$new/g" > "$to/$new.jsonl" || true
+    grep -v -e '"type":"bridge-session"' -e '"type":"history-suppression"' "$f" \
+      | sed -e "$(upload_paths "$id" "$new" "$name")" -e "s/$id/$new/g" > "$to/$new.jsonl" || true
     chmod --reference="$f" "$to/$new.jsonl"
     touch -r "$f" "$to/$new.jsonl"   # ct resumes the newest transcript: keep their order
     if [[ -d $from/$id ]]; then cp -a "$from/$id" "$to/$new"; fi
     copy_history "$id" "$new" "$name"
+    copy_uploads "$id" "$new" "$name"
   done
   echo "ct-profile: copied $n conversation(s) into $name under new ids, unlinked from Remote Control" >&2
 }
@@ -114,6 +118,28 @@ copy_history() { # old-id new-id profile: the checkpoints /rewind restores from
   [[ -d $src && ! -e $dst ]] || return 0
   mkdir -p "${dst%/*}"; cp -a "$src" "$dst"
 }
+
+# The files the person attached (PDFs, screenshots) live beside the transcript,
+# in uploads/<conversation id>/, and the transcript names them by absolute path.
+# Without them a moved conversation remembers what it read but cannot open it
+# again, and under a new id its paths name a folder that does not exist.
+copy_uploads() { # old-id new-id profile
+  local src="$HOME/.claude/uploads/$1" dst="$root/.profiles/$3/claude/uploads/$2"
+  [[ -d $src && ! -e $dst ]] || return 0
+  mkdir -p "${dst%/*}"; cp -a "$src" "$dst"
+}
+
+# A sed script that points the transcript's upload paths at the profile's copy:
+# both the spelling through ~/.claude and the real path, which differs when
+# ~/.claude is a link (into another profile, say). A path written relative to a
+# working directory is left as it is: there is no telling what it was relative to.
+upload_paths() { # old-id new-id profile
+  local dst="$root/.profiles/$3/claude/uploads/$2" via="$HOME/.claude" real p script=""
+  real="$(cd "$via" && pwd -P)"
+  for p in "$via" "$real"; do script+="s|$(re_quote "$p/uploads/$1")|$dst|g;"; done
+  printf '%s' "$script"
+}
+re_quote() { printf '%s' "$1" | sed 's/[][\.^$*|]/\\&/g'; }
 
 has_transcripts() { local f; for f in "$1"/*.jsonl; do [[ -e $f ]] && return 0; done; return 1; }
 ws_key() { printf '%s' "${1##*/}" | tr -c 'A-Za-z0-9_-' '-'; }   # as ct-autostart names sessions

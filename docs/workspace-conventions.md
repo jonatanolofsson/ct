@@ -196,12 +196,13 @@ CLAUDE_CONFIG_DIR="$logins/claude"; fi` after the gcloud lines). Without a profi
 
     ct-profile claude <name>             # its own claude.ai login: sign in once with `claude /login`
     ct-profile claude <name> bedrock     # the site's backend, from $CT_BEDROCK_SETTINGS: no login
-    ct-profile move <workspace> <name>   # copy the workspace's conversations and memory into it
+    ct-profile move <workspace> <name>   # copy the workspace's conversations, memory and uploaded files into it
     ct-profile move <workspace> <name> --own-accounts   # ...and let Remote Control show their history
 
 A new profile starts from the machine's `~/.claude/settings.json` (hooks, permissions, `plansDirectory`) and links
 its skills, agents, commands and plugins; it never copies a login. A conversation copied into a profile resumes
-there with its whole history, on the profile's backend.
+there with its whole history, on the profile's backend. The files the person attached to it (`uploads/`) come along,
+and the paths in the conversation are pointed at the copies, so the agent can open them again.
 
 **Move with the agent stopped:** `touch ~/.ct-noautostart`, `tmux kill-session -t =claude-<workspace>`, then
 move, then `rm ~/.ct-noautostart`. `move` refuses while the agent runs, because the copy would miss its last turns.

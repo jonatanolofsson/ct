@@ -99,6 +99,39 @@ linked_transcript() { # dir id: a conversation once linked to Remote Control, an
   [ -f "$P/acme/claude/file-history/s1/f@v1" ]
 }
 
+@test "move brings the conversation's uploaded files and points its paths at them" {
+  "$REPO/bin/ct-profile" claude acme
+  key="$(printf '%s' "$HOME/dev/agent-alpha" | tr -c 'A-Za-z0-9' '-')"
+  mkdir -p "$HOME/.claude/projects/$key" "$HOME/.claude/uploads/s1"
+  echo pdf > "$HOME/.claude/uploads/s1/a1-offert.pdf"
+  echo '{"message":"read '"$HOME"'/.claude/uploads/s1/a1-offert.pdf"}' > "$HOME/.claude/projects/$key/s1.jsonl"
+  run "$REPO/bin/ct-profile" move "$HOME/dev/agent-alpha" acme
+  [ "$status" -eq 0 ]
+  [ -f "$P/acme/claude/uploads/s1/a1-offert.pdf" ]
+  grep -qF "$P/acme/claude/uploads/s1/a1-offert.pdf" "$P/acme/claude/projects/$key/s1.jsonl"
+  grep -qF "$HOME/.claude/uploads/s1/a1-offert.pdf" "$HOME/.claude/projects/$key/s1.jsonl"
+}
+
+@test "move --own-accounts files the uploads under the new id, also when ~/.claude is a link" {
+  # Moving between two profiles: ~/.claude links to the source, and the
+  # transcript spells the source's real path.
+  "$REPO/bin/ct-profile" claude acme
+  key="$(printf '%s' "$HOME/dev/agent-alpha" | tr -c 'A-Za-z0-9' '-')"
+  old=11111111-1111-1111-1111-111111111111
+  mv "$HOME/.claude" "$HOME/real-claude"; ln -s "$HOME/real-claude" "$HOME/.claude"
+  linked_transcript "$HOME/.claude/projects/$key" "$old"
+  mkdir -p "$HOME/.claude/uploads/$old"; echo png > "$HOME/.claude/uploads/$old/b2-image.png"
+  echo '{"type":"user","sessionId":"'"$old"'","message":"see '"$HOME"'/real-claude/uploads/'"$old"'/b2-image.png"}' >> "$HOME/.claude/projects/$key/$old.jsonl"
+  run "$REPO/bin/ct-profile" move "$HOME/dev/agent-alpha" acme --own-accounts
+  [ "$status" -eq 0 ]
+  dst="$P/acme/claude/projects/$key"
+  new="$(basename "$(ls "$dst"/*.jsonl)" .jsonl)"
+  [ -f "$P/acme/claude/uploads/$new/b2-image.png" ]
+  grep -qF "$P/acme/claude/uploads/$new/b2-image.png" "$dst/$new.jsonl"
+  run grep -c real-claude "$dst/$new.jsonl"
+  [ "$output" = 0 ]
+}
+
 @test "move refuses while the workspace's agent is running, and copies nothing" {
   "$REPO/bin/ct-profile" claude acme
   key="$(printf '%s' "$HOME/dev/agent-alpha" | tr -c 'A-Za-z0-9' '-')"
