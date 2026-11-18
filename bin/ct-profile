@@ -8,6 +8,7 @@
 #        [--own-accounts]              ...and their Remote Control history, when
 #                                      the profile's claude.ai account is also
 #                                      the person's (see move below)
+#        [--from <profile>]            ...from another profile, not ~/.claude
 #
 # A profile is <root>/.profiles/<name>/ (docs/workspace-conventions.md); a
 # workspace naming it in its .envrc gets CLAUDE_CONFIG_DIR=<profile>/claude.
@@ -19,6 +20,7 @@
 set -euo pipefail
 
 root="${WORKSPACE_ROOT:-${CT_WORKSPACE_ROOT:-$HOME/dev}}"
+from_cfg="$HOME/.claude"   # where move copies from: ~/.claude, or --from a profile
 die() { echo "ct-profile: $*" >&2; exit 2; }
 key() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '-'; }
 
@@ -49,21 +51,55 @@ claude_profile() { # name [bedrock]
   echo "ct-profile: $dir ready ($kind)" >&2
 }
 
-# A conversation that was linked to Remote Control carries `bridge-session`
-# rows naming the claude.ai account it was linked under. Resumed under another
-# account, Claude Code writes a `history-suppression` row
-# (restored_owner_mismatch) and opens a remote session without its history or
-# its name, and every later start renews the veto. That guard is right when the
-# accounts belong to different people. --own-accounts says they are both the
-# person's: each conversation is copied under a new id without those rows, so
-# its first start in the profile opens a remote session with the whole history.
-move() { # workspace name [--own-accounts]
-  local ws="$1" name="$2" own="${3:-}" from to f id new n=0 linked=0
+# A conversation records which claude.ai account it ran under, in three kinds
+# of row: `bridge-session` (the Remote Control session it was linked to, and
+# that session's owner), `session-owner` (the account and organization it
+# belongs to) and the `credential_org` attachments (the organization each turn
+# was sent with). Resumed under another account, Claude Code takes any of them
+# as "this conversation names another sign-in": it writes a
+# `history-suppression` row, or opens the remote session with
+# noHistoryBackfill, and Remote Control shows it without its history or its
+# name, on every later start too. That guard is right when the accounts belong
+# to different people. --own-accounts says they are both the person's: each
+# conversation is copied under a new id, without the first two kinds of row and
+# with every credential_org naming the profile's own organization, so its first
+# start in the profile opens a remote session with the whole history and name.
+# That is why the profile must be signed in first: its organization is read
+# from its .claude.json.
+move() { # workspace name [--own-accounts] [--from <profile>]
+  local ws="" name="" own="" src_profile="" from to f id new org="" n=0 linked=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --own-accounts) own=1 ;;
+      --from) [[ $# -ge 2 ]] || die "--from needs a profile name"; src_profile="$2"; shift ;;
+      --*) die "unknown option '$1'" ;;
+      *) if [[ -z $ws ]]; then ws="$1"; elif [[ -z $name ]]; then name="$1"; else die "too many arguments"; fi ;;
+    esac
+    shift
+  done
+  [[ -n $ws && -n $name ]] || die "usage: ct-profile move <workspace> <name> [--own-accounts] [--from <profile>]"
+  # A bare name means a workspace under the root; either way the key must be
+  # built from the absolute path, as Claude Code builds its project directory.
+  [[ -d $ws || ! -d $root/$ws ]] || ws="$root/$ws"
   [[ -d $ws ]] || die "no workspace $ws"
-  [[ -z $own || $own == --own-accounts ]] || die "unknown option '$own'"
-  from="$HOME/.claude/projects/$(key "$ws")"
+  ws="$(cd "$ws" && pwd)"
+  # The conversations come from the machine's ~/.claude, or with --from from
+  # another profile's: a workspace that already lives in one profile and moves
+  # to the next.
+  from_cfg="$HOME/.claude"
+  if [[ -n $src_profile ]]; then
+    from_cfg="$root/.profiles/$src_profile/claude"
+    [[ -d $from_cfg ]] || die "no profile $src_profile to move from"
+    [[ $src_profile != "$name" ]] || die "--from and the target are the same profile"
+  fi
+  from="$from_cfg/projects/$(key "$ws")"
   to="$root/.profiles/$name/claude/projects/$(key "$ws")"
   [[ -d "$root/.profiles/$name/claude" ]] || die "no profile $name (ct-profile claude $name first)"
+  if [[ -n $own ]]; then
+    org="$(jq -r '.oauthAccount.organizationUuid // empty' "$root/.profiles/$name/claude/.claude.json" 2>/dev/null || true)"
+    [[ $org =~ ^[0-9a-f-]{36}$ ]] ||
+      die "--own-accounts needs $name signed in first (CLAUDE_CONFIG_DIR=$root/.profiles/$name/claude claude auth login): it names the profile's organization in the copy"
+  fi
   [[ -d $from ]] || { echo "ct-profile: nothing to move ($from does not exist)" >&2; return 0; }
   # A running agent keeps writing the original, so the copy would miss its last
   # turns; ct-autostart would start it again within minutes, hence the pause.
@@ -102,8 +138,13 @@ move() { # workspace name [--own-accounts]
   for f in "$from"/*.jsonl; do
     [[ -e $f ]] || continue
     id="$(basename "$f" .jsonl)"; new="$(new_id)"; n=$((n + 1))
-    grep -v -e '"type":"bridge-session"' -e '"type":"history-suppression"' "$f" \
-      | sed -e "$(upload_paths "$id" "$new" "$name")" -e "s/$id/$new/g" > "$to/$new.jsonl" || true
+    # Rows are matched from the start of the line: a turn that only quotes one
+    # of these names (an agent reading a transcript) is part of the
+    # conversation's chain, and dropping it would break the chain.
+    grep -Ev '^\{"type":"(bridge-session|history-suppression|session-owner)"' "$f" \
+      | sed -e "$(upload_paths "$id" "$new" "$name")" -e "s/$id/$new/g" \
+            -e "s/\"attachment\":{\"type\":\"credential_org\",\"organizationUuid\":\"[0-9a-f-]*\"/\"attachment\":{\"type\":\"credential_org\",\"organizationUuid\":\"$org\"/g" \
+      > "$to/$new.jsonl" || true
     chmod --reference="$f" "$to/$new.jsonl"
     touch -r "$f" "$to/$new.jsonl"   # ct resumes the newest transcript: keep their order
     if [[ -d $from/$id ]]; then cp -a "$from/$id" "$to/$new"; fi
@@ -114,7 +155,7 @@ move() { # workspace name [--own-accounts]
 }
 
 copy_history() { # old-id new-id profile: the checkpoints /rewind restores from
-  local src="$HOME/.claude/file-history/$1" dst="$root/.profiles/$3/claude/file-history/$2"
+  local src="$from_cfg/file-history/$1" dst="$root/.profiles/$3/claude/file-history/$2"
   [[ -d $src && ! -e $dst ]] || return 0
   mkdir -p "${dst%/*}"; cp -a "$src" "$dst"
 }
@@ -124,7 +165,7 @@ copy_history() { # old-id new-id profile: the checkpoints /rewind restores from
 # Without them a moved conversation remembers what it read but cannot open it
 # again, and under a new id its paths name a folder that does not exist.
 copy_uploads() { # old-id new-id profile
-  local src="$HOME/.claude/uploads/$1" dst="$root/.profiles/$3/claude/uploads/$2"
+  local src="$from_cfg/uploads/$1" dst="$root/.profiles/$3/claude/uploads/$2"
   [[ -d $src && ! -e $dst ]] || return 0
   mkdir -p "${dst%/*}"; cp -a "$src" "$dst"
 }
@@ -134,7 +175,7 @@ copy_uploads() { # old-id new-id profile
 # ~/.claude is a link (into another profile, say). A path written relative to a
 # working directory is left as it is: there is no telling what it was relative to.
 upload_paths() { # old-id new-id profile
-  local dst="$root/.profiles/$3/claude/uploads/$2" via="$HOME/.claude" real p script=""
+  local dst="$root/.profiles/$3/claude/uploads/$2" via="$from_cfg" real p script=""
   real="$(cd "$via" && pwd -P)"
   for p in "$via" "$real"; do script+="s|$(re_quote "$p/uploads/$1")|$dst|g;"; done
   printf '%s' "$script"
@@ -151,6 +192,6 @@ new_id() {
 
 case "${1:-}" in
   claude) shift; [[ $# -ge 1 ]] || die "usage: ct-profile claude <name> [bedrock]"; claude_profile "$@" ;;
-  move)   shift; [[ $# -eq 2 || $# -eq 3 ]] || die "usage: ct-profile move <workspace> <name> [--own-accounts]"; move "$@" ;;
-  *) die "usage: ct-profile claude <name> [bedrock] | move <workspace> <name> [--own-accounts]" ;;
+  move)   shift; move "$@" ;;
+  *) die "usage: ct-profile claude <name> [bedrock] | move <workspace> <name> [--own-accounts] [--from <profile>]" ;;
 esac

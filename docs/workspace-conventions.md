@@ -198,6 +198,7 @@ CLAUDE_CONFIG_DIR="$logins/claude"; fi` after the gcloud lines). Without a profi
     ct-profile claude <name> bedrock     # the site's backend, from $CT_BEDROCK_SETTINGS: no login
     ct-profile move <workspace> <name>   # copy the workspace's conversations, memory and uploaded files into it
     ct-profile move <workspace> <name> --own-accounts   # ...and let Remote Control show their history
+    ct-profile move <workspace> <name> --from <profile> # from another profile instead of ~/.claude
 
 A new profile starts from the machine's `~/.claude/settings.json` (hooks, permissions, `plansDirectory`) and links
 its skills, agents, commands and plugins; it never copies a login. A conversation copied into a profile resumes
@@ -207,13 +208,24 @@ and the paths in the conversation are pointed at the copies, so the agent can op
 **Move with the agent stopped:** `touch ~/.ct-noautostart`, `tmux kill-session -t =claude-<workspace>`, then
 move, then `rm ~/.ct-noautostart`. `move` refuses while the agent runs, because the copy would miss its last turns.
 
-**Remote Control belongs to a claude.ai account.** A conversation that was linked to it under one account and then
-resumes under another shows there without its history or its name: Claude Code records a veto in the transcript
-(`history-suppression`) on the first such start, and renews it on every later one. `/rename` does not reach the
-remote session. When the profile's account is also the person's, move with `--own-accounts`, before the agent
-first starts in the profile: each conversation is copied under a new id without its Remote Control rows, so it
-comes up as a new remote session with its whole history and its name. The old remote sessions stay under the old
-account; archive them there. Don't use it to move a conversation into someone else's account.
+**Remote Control belongs to a claude.ai account.** A conversation records the account it ran under, and when it
+resumes under another one Claude Code takes that as "this conversation names another sign-in": the remote session
+opens without its history or its name, on every later start too, and `/rename` does not reach it. Three kinds of
+row carry the old account: `bridge-session` (the remote session it was linked to), `session-owner` (its account
+and organization) and the `credential_org` attachments (the organization each turn was sent with). When the
+profile's account is also the person's, move with `--own-accounts`, in this order:
+
+1. create the profile and **sign it in first** (`CLAUDE_CONFIG_DIR=<root>/.profiles/<name>/claude claude auth
+   login`, which prints a link to open): `--own-accounts` refuses a profile without a login, because it writes the
+   profile's organization into the copy;
+2. stop the agent, then `ct-profile move <workspace> <name> --own-accounts` (add `--from <profile>` when the
+   workspace already lives in a profile): each conversation is copied under a new id, without the first two kinds
+   of row and with every `credential_org` naming the profile's organization;
+3. set `ct_profile=<name>` in the workspace `.envrc`, `direnv allow` it, and let the agent start.
+
+It then comes up as a new remote session with its whole history and its name, under the profile's account. The
+old remote sessions stay under the old account; archive them there. Don't use it to move a conversation into
+someone else's account: this is the guard that keeps one person's history out of another's.
 
 **A workspace's name says who pays.** One ending in `-bedrock` uses a bedrock profile, and no other workspace
 does; ct warns at start when the two disagree.
