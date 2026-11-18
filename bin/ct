@@ -664,6 +664,45 @@ if [[ -n $sid && -z "${CT_KEEP_MODE:-}" ]] && ((moded == 0)); then
   fi
 fi
 
+# A resumed conversation comes back on the model and effort it last ran with.
+# Claude starts a resumed conversation on the account's default model and the
+# default effort, so whatever someone chose with /model or /effort is lost at
+# every restart (measured on claude 2.1.327: a conversation on xhigh effort came
+# back on medium after each restart of the machine). Claude records both on
+# every request of the conversation's own thread: the transcript's
+# `api-request` rows with `"querySource":"repl_main_thread"` carry
+# `params.model` and `params.effort`. ct passes the last of each.
+#
+# What it leaves alone:
+#   - the caller's own --model or --effort, and CT_KEEP_MODEL=1;
+#   - the model, when the settings in use name one (a profile for another
+#     backend does): a model id from the conversation's earlier backend may not
+#     exist on this one, and the settings' choice is deliberate;
+#   - a conversation Claude runs, or ran, as a background job, as above.
+# If no such row exists, or its form changes, nothing is passed.
+model_set=0 effort_set=0
+for a in "$@"; do
+  case "$a" in --model|--model=*) model_set=1 ;; --effort|--effort=*) effort_set=1 ;; esac
+done
+if [[ -n $sid && -z "${CT_KEEP_MODEL:-}" ]] && ((model_set == 0 || effort_set == 0)); then
+  run_dir="$(claude_dir "$agent_ws")"
+  run_log="$(transcripts "$workspace")/$sid.jsonl"
+  if [[ -f $run_log && ! -e "$run_dir/jobs/${sid%%-*}" ]]; then
+    # `|| true`: no match must not end ct under `set -e` and pipefail.
+    run_last=$(grep -a '^{"type":"api-request"' "$run_log" | grep -a '"querySource":"repl_main_thread"' | tail -1) || true
+    run_model=$(printf '%s' "$run_last" | grep -o '"model":"[A-Za-z0-9._:/@-]*"' | head -1 | sed 's/.*:"\(.*\)"$/\1/') || true
+    run_effort=$(printf '%s' "$run_last" | grep -o '"effort":"[a-z]*"' | head -1 | sed 's/.*:"\(.*\)"$/\1/') || true
+    if [[ -f $run_dir/settings.json ]] && grep -q '"model"[[:space:]]*:' "$run_dir/settings.json"; then run_model=""; fi
+    case "$run_effort" in low|medium|high|xhigh|max) ;; *) run_effort="" ;; esac
+    if ((model_set == 0)) && [[ -n $run_model ]]; then cmd+=" --model $(printf '%q' "$run_model")"; fi
+    if ((effort_set == 0)) && [[ -n $run_effort ]]; then cmd+=" --effort $(printf '%q' "$run_effort")"; fi
+    if [[ -n $run_model$run_effort ]]; then
+      run_said="$run_model"; [[ -n $run_said ]] || run_said="the model the settings name"
+      echo "ct: resuming on $run_said${run_effort:+, $run_effort effort}, as it last ran (CT_KEEP_MODEL=1 leaves both to Claude)" >&2
+    fi
+  fi
+fi
+
 # Name the CLAUDE session after the workspace as well. Without -n every session
 # gets a random adjective-noun pair ("frolicking-prism"), which is what makes a
 # dozen parallel workspaces indistinguishable in the prompt box, the /resume
