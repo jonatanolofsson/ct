@@ -10,7 +10,7 @@ setup() {
   # Not the caller's ct settings: an agent started by ct-autostart has some set.
   # Nor its XDG_CONFIG_HOME: GitHub's runners set one, and ct reads wake.md from
   # it rather than from the test's $HOME.
-  unset XDG_CONFIG_HOME CT_AUTOSTART_GLOB CT_WORKSPACE_ROOT CT_FRESH CT_DETACH CT_AGENT CT_WAKE CT_WAKE_SINCE CT_WAKE_FILE CT_OPENCODE_WEB CT_OPENCODE_SERVER_PORT CT_OPENCODE_SERVER_WAIT CT_PROFILE CURL_STUB_FAIL CURL_STUB_HEALTH_FAILS CURL_STUB_SESSIONS DIRENV_STUB_BLOCKED
+  unset XDG_CONFIG_HOME CT_KEEP_MODEL CT_AUTOSTART_GLOB CT_WORKSPACE_ROOT CT_FRESH CT_DETACH CT_AGENT CT_WAKE CT_WAKE_SINCE CT_WAKE_FILE CT_OPENCODE_WEB CT_OPENCODE_SERVER_PORT CT_OPENCODE_SERVER_WAIT CT_PROFILE CURL_STUB_FAIL CURL_STUB_HEALTH_FAILS CURL_STUB_SESSIONS DIRENV_STUB_BLOCKED
   export DIRENV_STUB_LOG="$BATS_TEST_TMPDIR/direnv.log"
   : > "$TMUX_STUB_LOG"; : > "$TMUX_STUB_SESSIONS"
   export HOME="$BATS_TEST_TMPDIR/home"
@@ -785,4 +785,72 @@ again()          { : > "$TMUX_STUB_LOG"; : > "$TMUX_STUB_SESSIONS"; }
   default_mode plan                                    # the machine's settings must not be the ones read
   ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
   grep -q -- '--resume pppppppp-1111 --permission-mode auto ' "$TMUX_STUB_LOG"
+}
+
+ran_on() { # workspace, session-id, querySource, model, effort: append one api-request row
+  local key; key="$HOME/.claude/projects/$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-')"
+  printf '{"type":"api-request","sessionId":"x","querySource":"%s","params":{"model":"%s","effort":"%s","max_tokens":64000}}\n' "$3" "$4" "$5" >> "$key/$2.jsonl"
+}
+
+@test "a resumed conversation comes back on the model and effort its own thread last ran with" {
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200
+  ran_on "$HOME/dev/agent-alpha" "aaaaaaaa-1111" repl_main_thread claude-opus-5-5 medium
+  ran_on "$HOME/dev/agent-alpha" "aaaaaaaa-1111" repl_main_thread claude-fable-5-1 xhigh
+  ran_on "$HOME/dev/agent-alpha" "aaaaaaaa-1111" agent:explore claude-haiku-5-5 low   # a subagent's: not the conversation's
+  run run_ct "$HOME/dev/agent-alpha"
+  [[ $status -eq 0 ]]
+  grep -q -- '--resume aaaaaaaa-1111 --model claude-fable-5-1 --effort xhigh ' "$TMUX_STUB_LOG"
+  [[ $output == *"resuming on claude-fable-5-1, xhigh effort, as it last ran"* ]]
+}
+
+@test "the caller's own --model or --effort wins, and CT_KEEP_MODEL leaves both to Claude" {
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200
+  ran_on "$HOME/dev/agent-alpha" "aaaaaaaa-1111" repl_main_thread claude-fable-5-1 xhigh
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" --model claude-sonnet-5-5 )
+  [ "$(grep -o -- '--model' "$TMUX_STUB_LOG" | wc -l)" -eq 1 ]
+  grep -q -- '--model claude-sonnet-5-5' "$TMUX_STUB_LOG"
+  grep -q -- '--effort xhigh ' "$TMUX_STUB_LOG"
+
+  again
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" --effort=low )
+  grep -q -- '--model claude-fable-5-1 ' "$TMUX_STUB_LOG"
+  [ "$(grep -o -- '--effort' "$TMUX_STUB_LOG" | wc -l)" -eq 1 ]
+
+  again
+  ( cd "$HOME/dev/agent-alpha" && CT_KEEP_MODEL=1 "$REPO/bin/ct" )
+  resumed aaaaaaaa-1111
+  if grep -q -- '--model\|--effort' "$TMUX_STUB_LOG"; then echo "unexpected: $(cat "$TMUX_STUB_LOG")"; false; fi
+}
+
+@test "settings that name a model keep it; the effort still comes back" {
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111" 200
+  ran_on "$HOME/dev/agent-alpha" "aaaaaaaa-1111" repl_main_thread claude-fable-5-1 high
+  mkdir -p "$HOME/.claude"; echo '{"model": "us.anthropic.claude-opus-5-5"}' > "$HOME/.claude/settings.json"
+  run run_ct "$HOME/dev/agent-alpha"
+  if grep -q -- '--model' "$TMUX_STUB_LOG"; then echo "unexpected --model: $(cat "$TMUX_STUB_LOG")"; false; fi
+  grep -q -- '--effort high ' "$TMUX_STUB_LOG"
+  [[ $output == *"resuming on the model the settings name, high effort"* ]]
+}
+
+@test "no request rows, an unknown effort, a fresh start or a background job: nothing is passed" {
+  mkts "$HOME/dev/agent-alpha" "aaaaaaaa-1111-2222" 200
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  resumed aaaaaaaa-1111-2222
+  if grep -q -- '--model\|--effort' "$TMUX_STUB_LOG"; then echo "unexpected: $(cat "$TMUX_STUB_LOG")"; false; fi
+
+  again
+  ran_on "$HOME/dev/agent-alpha" "aaaaaaaa-1111-2222" repl_main_thread 'claude-opus-5-5" --x "' 'ultra'
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  if grep -q -- '--effort\|--x' "$TMUX_STUB_LOG"; then echo "unexpected: $(cat "$TMUX_STUB_LOG")"; false; fi
+
+  again
+  ran_on "$HOME/dev/agent-alpha" "aaaaaaaa-1111-2222" repl_main_thread claude-fable-5-1 xhigh
+  ( cd "$HOME/dev/agent-alpha" && CT_FRESH=1 "$REPO/bin/ct" )
+  if grep -q -- '--model\|--effort' "$TMUX_STUB_LOG"; then echo "unexpected: $(cat "$TMUX_STUB_LOG")"; false; fi
+
+  again
+  mkdir -p "$HOME/.claude/jobs/aaaaaaaa"
+  ( cd "$HOME/dev/agent-alpha" && "$REPO/bin/ct" )
+  resumed aaaaaaaa-1111-2222
+  if grep -q -- '--model\|--effort' "$TMUX_STUB_LOG"; then echo "unexpected: $(cat "$TMUX_STUB_LOG")"; false; fi
 }

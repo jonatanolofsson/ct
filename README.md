@@ -32,6 +32,7 @@ Settings are environment variables, never flags. Every argument is forwarded to 
 | `CT_SESSION_ID` + `CT_NAME` | pin one claude conversation by id, run from its own directory (see below) |
 | `CT_WAKE` | `0`: ct-autostart wakes nobody with a message (see below) |
 | `CT_KEEP_MODE` | resume a conversation in the permission mode it was left in, even accept-edits or manual (see below) |
+| `CT_KEEP_MODEL` | resume a conversation on the model and effort Claude picks, not the ones it last ran with |
 
 ct also *exports* two variables into every agent it starts, so the workspace conventions' "Add a repo"
 recipe runs as written: `CT_WORKSPACE` (the agent's workspace) and `WORKSPACE_ROOT` (the root holding
