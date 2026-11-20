@@ -102,6 +102,10 @@ owned_transcript() { # dir id: a conversation that also names its old account an
     echo '{"type":"assistant","uuid":"u3","parentUuid":"u2","sessionId":"'"$2"'","message":"rows like {\"type\":\"session-owner\"} carry the account"}'
   } >> "$1/$2.jsonl"
 }
+compacted_transcript() { # dir id: an owned conversation that was also compacted under its old organization
+  owned_transcript "$1" "$2"
+  echo '{"parentUuid":null,"logicalParentUuid":"u3","type":"system","subtype":"compact_boundary","uuid":"u4","compactMetadata":{"trigger":"auto","preCompactOrganizations":["'"$OLD_ORG"'"],"preservedSegment":{"headUuid":"u2","tailUuid":"u3"}},"sessionId":"'"$2"'"}' >> "$1/$2.jsonl"
+}
 
 @test "move copies a conversation's file history too" {
   "$REPO/bin/ct-profile" claude acme
@@ -218,6 +222,22 @@ owned_transcript() { # dir id: a conversation that also names its old account an
   jq -e -s 'map(select(.attachment.type == "credential_org")) | length == 1 and .[0].organizationUuid == null and .[0].attachment.organizationUuid == "'"$NEW_ORG"'" and .[0].uuid == "u2"' "$f"
   # a turn that only quotes a row type stays, or the chain from u2 to u3 breaks
   jq -e -s 'any(.uuid == "u3" and .parentUuid == "u2")' "$f"
+  grep -q "$OLD_ORG" "$HOME/.claude/projects/$key/11111111-1111-1111-1111-111111111111.jsonl"
+}
+
+@test "move --own-accounts names the profile's organization in a compaction's record too" {
+  "$REPO/bin/ct-profile" claude acme
+  signed_in acme
+  key="$(printf '%s' "$HOME/dev/agent-alpha" | tr -c 'A-Za-z0-9' '-')"
+  compacted_transcript "$HOME/.claude/projects/$key" 11111111-1111-1111-1111-111111111111
+  run "$REPO/bin/ct-profile" move "$HOME/dev/agent-alpha" acme --own-accounts
+  [ "$status" -eq 0 ]
+  f="$(ls "$P/acme/claude/projects/$key"/*.jsonl)"
+  # Left naming the old organization, the record alone makes Claude Code open
+  # the remote session with noHistoryBackfill: measured on claude 2.1.329.
+  run grep -c "$OLD_ORG" "$f"
+  [ "$output" = 0 ]
+  jq -e -s 'map(select(.subtype == "compact_boundary")) | length == 1 and .[0].uuid == "u4" and .[0].logicalParentUuid == "u3" and .[0].compactMetadata.preCompactOrganizations == ["'"$NEW_ORG"'"] and .[0].compactMetadata.preservedSegment.tailUuid == "u3"' "$f"
   grep -q "$OLD_ORG" "$HOME/.claude/projects/$key/11111111-1111-1111-1111-111111111111.jsonl"
 }
 
