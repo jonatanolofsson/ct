@@ -51,19 +51,22 @@ claude_profile() { # name [bedrock]
   echo "ct-profile: $dir ready ($kind)" >&2
 }
 
-# A conversation records which claude.ai account it ran under, in three kinds
+# A conversation records which claude.ai account it ran under, in four kinds
 # of row: `bridge-session` (the Remote Control session it was linked to, and
 # that session's owner), `session-owner` (the account and organization it
-# belongs to) and the `credential_org` attachments (the organization each turn
-# was sent with). Resumed under another account, Claude Code takes any of them
-# as "this conversation names another sign-in": it writes a
+# belongs to), the `credential_org` attachments (the organization each turn
+# was sent with) and, in a conversation that was compacted, the
+# `compact_boundary` rows' `preCompactOrganizations` (the organizations the
+# compacted turns were sent with). Resumed under another account, Claude Code
+# takes any of them as "this conversation names another sign-in": it writes a
 # `history-suppression` row, or opens the remote session with
 # noHistoryBackfill, and Remote Control shows it without its history or its
 # name, on every later start too. That guard is right when the accounts belong
 # to different people. --own-accounts says they are both the person's: each
 # conversation is copied under a new id, without the first two kinds of row and
-# with every credential_org naming the profile's own organization, so its first
-# start in the profile opens a remote session with the whole history and name.
+# with every credential_org and preCompactOrganizations naming the profile's
+# own organization, so its first start in the profile opens a remote session
+# with the whole history and name.
 # That is why the profile must be signed in first: its organization is read
 # from its .claude.json.
 move() { # workspace name [--own-accounts] [--from <profile>]
@@ -144,6 +147,7 @@ move() { # workspace name [--own-accounts] [--from <profile>]
     grep -Ev '^\{"type":"(bridge-session|history-suppression|session-owner)"' "$f" \
       | sed -e "$(upload_paths "$id" "$new" "$name")" -e "s/$id/$new/g" \
             -e "s/\"attachment\":{\"type\":\"credential_org\",\"organizationUuid\":\"[0-9a-f-]*\"/\"attachment\":{\"type\":\"credential_org\",\"organizationUuid\":\"$org\"/g" \
+            -e "s/\"preCompactOrganizations\":\[[^]]*\]/\"preCompactOrganizations\":[\"$org\"]/g" \
       > "$to/$new.jsonl" || true
     chmod --reference="$f" "$to/$new.jsonl"
     touch -r "$f" "$to/$new.jsonl"   # ct resumes the newest transcript: keep their order
