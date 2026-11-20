@@ -100,7 +100,11 @@ owned_transcript() { # dir id: a conversation that also names its old account an
     echo '{"type":"session-owner","accountUuid":"acct-old","organizationUuid":"'"$OLD_ORG"'","sessionId":"'"$2"'"}'
     echo '{"parentUuid":"u1","attachment":{"type":"credential_org","organizationUuid":"'"$OLD_ORG"'"},"type":"attachment","uuid":"u2","sessionId":"'"$2"'"}'
     echo '{"type":"assistant","uuid":"u3","parentUuid":"u2","sessionId":"'"$2"'","message":"rows like {\"type\":\"session-owner\"} carry the account"}'
+    echo '{"parentUuid":null,"logicalParentUuid":"u3","type":"system","subtype":"compact_boundary","content":"Conversation compacted","compactMetadata":{"trigger":"auto","preCompactOrganizations":["'"$OLD_ORG"'"]},"uuid":"u4","sessionId":"'"$2"'"}'
   } >> "$1/$2.jsonl"
+  mkdir -p "$1/$2/subagents"
+  echo '{"parentUuid":null,"isSidechain":true,"agentId":"a1","attachment":{"type":"credential_org","organizationUuid":"'"$OLD_ORG"'"},"type":"attachment","uuid":"s1","sessionId":"'"$2"'"}' \
+    > "$1/$2/subagents/agent-a1.jsonl"
 }
 
 @test "move copies a conversation's file history too" {
@@ -218,7 +222,51 @@ owned_transcript() { # dir id: a conversation that also names its old account an
   jq -e -s 'map(select(.attachment.type == "credential_org")) | length == 1 and .[0].organizationUuid == null and .[0].attachment.organizationUuid == "'"$NEW_ORG"'" and .[0].uuid == "u2"' "$f"
   # a turn that only quotes a row type stays, or the chain from u2 to u3 breaks
   jq -e -s 'any(.uuid == "u3" and .parentUuid == "u2")' "$f"
+  # a compaction records the organizations it summarised; the old one there
+  # opens the remote session without its history, as surely as an owner row
+  jq -e -s 'any(.uuid == "u4" and .compactMetadata.preCompactOrganizations == ["'"$NEW_ORG"'"])' "$f"
+  # the subagents are read too: their organization and their parent's id follow
+  new="$(basename "$f" .jsonl)"
+  s="$P/acme/claude/projects/$key/$new/subagents/agent-a1.jsonl"
+  jq -e '.attachment.organizationUuid == "'"$NEW_ORG"'" and .sessionId == "'"$new"'"' "$s"
   grep -q "$OLD_ORG" "$HOME/.claude/projects/$key/11111111-1111-1111-1111-111111111111.jsonl"
+  grep -q "$OLD_ORG" "$HOME/.claude/projects/$key/11111111-1111-1111-1111-111111111111/subagents/agent-a1.jsonl"
+}
+
+@test "move --own-accounts keeps only the last of the rows Claude Code rewrites every turn" {
+  "$REPO/bin/ct-profile" claude acme
+  signed_in acme
+  key="$(printf '%s' "$HOME/dev/agent-alpha" | tr -c 'A-Za-z0-9' '-')"
+  d="$HOME/.claude/projects/$key"; id=11111111-1111-1111-1111-111111111111
+  mkdir -p "$d"
+  {
+    for i in 1 2 3; do
+      echo '{"type":"user","uuid":"m'"$i"'","sessionId":"'"$id"'","message":"turn '"$i"'"}'
+      echo '{"type":"custom-title","customTitle":"agent-alpha","sessionId":"'"$id"'"}'
+      echo '{"type":"permission-mode","permissionMode":"mode-'"$i"'","sessionId":"'"$id"'"}'
+      echo '{"type":"last-prompt","lastPrompt":"turn '"$i"'","sessionId":"'"$id"'"}'
+    done
+  } > "$d/$id.jsonl"
+  run "$REPO/bin/ct-profile" move "$HOME/dev/agent-alpha" acme --own-accounts
+  [ "$status" -eq 0 ]
+  f="$(ls "$P/acme/claude/projects/$key"/*.jsonl)"
+  jq -e -s '(map(select(.type == "user")) | length == 3)
+    and (map(select(.type == "custom-title")) | length == 1)
+    and (map(select(.type == "permission-mode")) | length == 1 and .[0].permissionMode == "mode-3")
+    and (map(select(.type == "last-prompt")) | length == 1 and .[0].lastPrompt == "turn 3")
+    and (.[-1].type == "last-prompt")' "$f"
+}
+
+@test "move --own-accounts warns when a transcript is still too long for Remote Control's scan" {
+  "$REPO/bin/ct-profile" claude acme
+  signed_in acme
+  key="$(printf '%s' "$HOME/dev/agent-alpha" | tr -c 'A-Za-z0-9' '-')"
+  d="$HOME/.claude/projects/$key"; id=11111111-1111-1111-1111-111111111111
+  mkdir -p "$d"
+  yes '{"type":"user","message":"x","sessionId":"'"$id"'"}' | head -100001 > "$d/$id.jsonl"
+  run "$REPO/bin/ct-profile" move "$HOME/dev/agent-alpha" acme --own-accounts
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"without its history"* ]]
 }
 
 @test "move --own-accounts refuses a profile that is not signed in, and copies nothing" {
