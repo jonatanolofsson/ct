@@ -210,22 +210,32 @@ move, then `rm ~/.ct-noautostart`. `move` refuses while the agent runs, because 
 
 **Remote Control belongs to a claude.ai account.** A conversation records the account it ran under, and when it
 resumes under another one Claude Code takes that as "this conversation names another sign-in": the remote session
-opens without its history or its name, on every later start too, and `/rename` does not reach it. Three kinds of
+opens without its history or its name, on every later start too, and `/rename` does not reach it. Four kinds of
 row carry the old account: `bridge-session` (the remote session it was linked to), `session-owner` (its account
-and organization) and the `credential_org` attachments (the organization each turn was sent with). When the
-profile's account is also the person's, move with `--own-accounts`, in this order:
+and organization), the `credential_org` attachments (the organization each turn was sent with) and the
+`compact_boundary` rows of a conversation that has been compacted (`preCompactOrganizations`), in the main
+transcript and in its subagents' transcripts alike. When the profile's account is also the person's, move with
+`--own-accounts`, in this order:
 
 1. create the profile and **sign it in first** (`CLAUDE_CONFIG_DIR=<root>/.profiles/<name>/claude claude auth
    login`, which prints a link to open): `--own-accounts` refuses a profile without a login, because it writes the
    profile's organization into the copy;
 2. stop the agent, then `ct-profile move <workspace> <name> --own-accounts` (add `--from <profile>` when the
    workspace already lives in a profile): each conversation is copied under a new id, without the first two kinds
-   of row and with every `credential_org` naming the profile's organization;
+   of row and with every `credential_org` and `preCompactOrganizations` naming the profile's organization, its
+   subagents included;
 3. set `ct_profile=<name>` in the workspace `.envrc`, `direnv allow` it, and let the agent start.
 
 It then comes up as a new remote session with its whole history and its name, under the profile's account. The
 old remote sessions stay under the old account; archive them there. Don't use it to move a conversation into
 someone else's account: this is the guard that keeps one person's history out of another's.
+
+**A long conversation comes up empty all the same.** Before Claude Code back-fills a new remote session it scans
+the transcript for another account's rows, and it stops after 100 000 lines. A longer transcript has its history
+withheld, with no message saying so. Most of the length is rows Claude Code appends again on every turn (the
+title, the agent name, the mode, the last prompt), and `--own-accounts` keeps only the last of each: that took
+one conversation from 113 000 lines to 79 000 without touching a message. If a transcript is still over the limit
+afterwards, the move says so. The back-fill itself is capped by Claude Code at the last 200 events.
 
 **A workspace's name says who pays.** One ending in `-bedrock` uses a bedrock profile, and no other workspace
 does; ct warns at start when the two disagree.
