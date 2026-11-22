@@ -440,3 +440,11 @@ mkpin() { # name session-id dir
   run "$REPO/bin/ct-autostart"
   grep -q "claude -p ok" "$CLAUDE_STUB_LOG"
 }
+
+@test "ct-autostart --help prints its modes and starts nothing" {
+  run "$REPO/bin/ct-autostart" --help
+  [ "$status" -eq 0 ]
+  [[ $output == *"--loop"* && $output == *"--supervise"* && $output == *"ct-noautostart"* ]]
+  [[ $output != *"#"* ]]
+  ! grep -q 'new-session' "$TMUX_STUB_LOG" 2>/dev/null
+}

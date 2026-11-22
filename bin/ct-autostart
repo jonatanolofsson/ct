@@ -40,6 +40,7 @@ case "${1:-}" in
   --loop)      mode=loop ;;
   --restart)   mode=restart ;;
   --supervise) mode=supervise ;;
+  -h|--help)   sed -n '2,25{s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
   *) log "unknown argument '$1' (expected --loop, --restart or --supervise)"; exit 2 ;;
 esac
 

@@ -48,6 +48,9 @@ not, so always use it. Never clone from, copy, or edit another workspace's clone
     mkdir -p <root>/<workspace> && cd <root>/<workspace> && ct    # then add repos with the block above
     CT_PROFILE=<name> ct                                            # instead, to share a login profile (below)
 
+`ct` with any other arguments starts an agent: they go to the agent unchanged. To learn ct, run `ct --help`
+(also `ct-autostart --help`, `ct-profile --help`), which prints its usage and starts nothing.
+
 Tear down = confirm each clone is clean and pushed (`git status`; nothing unpushed), then delete the session dir.
 The canonical creds here are untouched — only the symlinks go. So is a profile in `.profiles/`: it outlives
 any one workspace.
