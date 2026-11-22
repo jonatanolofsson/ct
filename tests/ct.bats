@@ -854,3 +854,22 @@ ran_on() { # workspace, session-id, querySource, model, effort: append one api-r
   resumed aaaaaaaa-1111-2222
   if grep -q -- '--model\|--effort' "$TMUX_STUB_LOG"; then echo "unexpected: $(cat "$TMUX_STUB_LOG")"; false; fi
 }
+
+@test "ct --help prints ct's usage and starts no agent" {
+  for flag in --help -h; do
+    : > "$TMUX_STUB_LOG"
+    run run_ct "$HOME/dev/agent-alpha" "$flag"
+    [ "$status" -eq 0 ]
+    [[ $output == *"Usage:"* && $output == *"CT_PROFILE"* && $output == *"ct-profile --help"* ]]
+    ! grep -q 'new-session' "$TMUX_STUB_LOG"
+  done
+}
+
+@test "ct --help wins among other arguments, but not after --" {
+  run run_ct "$HOME/dev/agent-alpha" --model opus --help
+  [ "$status" -eq 0 ]
+  [[ $output == *"Usage:"* ]]
+  ! grep -q 'new-session' "$TMUX_STUB_LOG"
+  run run_ct "$HOME/dev/agent-alpha" -- --help
+  grep -q 'new-session' "$TMUX_STUB_LOG"
+}

@@ -32,6 +32,55 @@
 #   CT_AGENT=<agent> CT_AGENT_FORGET=1 ct
 set -euo pipefail
 
+# `ct --help` documents ct; it never starts an agent. Every other argument is
+# the agent's own, so `ct --help` used to reach claude inside a new tmux session
+# and leave an agent behind (observed repeatedly: agents run it to learn ct,
+# and each time it started a session at the workspace root). ct's help wins
+# wherever -h/--help stands before a `--`; claude's own flags are
+# `claude --help`.
+ct_help() {
+  cat <<'EOF'
+ct — start or reattach the coding agent of the workspace you stand in.
+
+Usage:
+  ct [agent args...]       start this workspace's agent in tmux, or reattach to it;
+                           its last conversation is resumed by default
+  ct --help, ct -h         this text (it starts nothing)
+
+A workspace is a directory directly under ~/dev or ~/workspaces (CT_WORKSPACE_ROOT
+overrides). Run ct anywhere inside one: the session is named after the workspace,
+<agent>-<workspace>, and the agent starts at the workspace root. Arguments other
+than --help go to the agent unchanged (claude's own: claude --help).
+
+Detach, leave it running:  Ctrl-b then d       Running sessions:  tmux ls
+Reattach explicitly:       tmux attach -t =<agent>-<workspace>
+
+Environment:
+  CT_AGENT=claude|opencode   which agent (default claude); each has its own session
+  CT_PROFILE=<name>          at a workspace's first launch: share a login profile
+                             in <root>/.profiles/<name> instead of its own logins
+  CT_DETACH=1                start detached, don't attach
+  CT_FRESH=1                 a new conversation instead of resuming the last one
+  CT_KEEP_MODE=1             resume in the mode the conversation was left in
+  CT_KEEP_MODEL=1            leave model and effort to the agent on resume
+  CT_SESSION_ID + CT_NAME    pin one conversation by id under a name (claude only),
+                             run from the directory it was started in
+  CT_AGENT_FORGET=1          stop autostarting CT_AGENT in this workspace
+
+Companions:
+  ct-autostart --help        bring every workspace's agents back (boot, loop)
+  ct-profile --help          login profiles; move a workspace's conversations
+  The conventions agents follow are in <root>/CLAUDE.md, which ct's installer
+  writes from docs/workspace-conventions.md.
+EOF
+}
+for a in "$@"; do
+  case "$a" in
+    --) break ;;
+    -h|--help) ct_help; exit 0 ;;
+  esac
+done
+
 agent="${CT_AGENT:-claude}"
 case "$agent" in
   claude|opencode) ;;

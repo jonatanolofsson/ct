@@ -326,3 +326,12 @@ owned_transcript() { # dir id: a conversation that also names its old account an
   run bash -c "cd '$HOME/dev/agent-alpha-bedrock' && CT_PROFILE=work '$REPO/bin/ct'"
   [[ "$output" != *"WARNING"* ]]
 }
+
+@test "ct-profile --help prints its commands, including move --from" {
+  for flag in --help -h help; do
+    run "$REPO/bin/ct-profile" "$flag"
+    [ "$status" -eq 0 ]
+    [[ $output == *"ct-profile claude <name>"* && $output == *"--from <profile>"* ]]
+    [[ $output != *"set -euo"* ]]
+  done
+}

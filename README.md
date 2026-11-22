@@ -15,7 +15,10 @@ agents in parallel against shared remotes.
     CT_DETACH=1 ct                  # start without attaching (scripts, boot)
     CT_FRESH=1 ct                   # a new conversation instead of resuming
 
-Settings are environment variables, never flags. Every argument is forwarded to the agent untouched.
+    ct --help                       # ct's usage; starts nothing (also ct-autostart, ct-profile)
+
+Settings are environment variables, never flags. Every argument is forwarded to the agent untouched, except
+`-h`/`--help` before a `--`, which prints ct's own usage instead of starting a session (`ct -- --help` passes it on).
 
 | Variable | Meaning |
 |---|---|
