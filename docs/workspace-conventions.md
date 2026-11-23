@@ -240,6 +240,15 @@ title, the agent name, the mode, the last prompt), and `--own-accounts` keeps on
 one conversation from 113 000 lines to 79 000 without touching a message. If a transcript is still over the limit
 afterwards, the move says so. The back-fill itself is capped by Claude Code at the last 200 events.
 
+**When a subscription runs out of usage, its agents can move to another.** `ct-profile switch <workspace>
+<profile>` moves a running agent onto that profile's Claude login, with its conversation, memory and Remote Control
+history (`--own-accounts` from the profile it was on), and starts it again. Only Claude moves: every other login the
+workspace's `.envrc` sets stays where it was, pinned in a marked block. A site that runs several subscriptions gives
+each a **profile manager**, an agent in `<profile>-manager` made by `ct-manager init <profile>`. It watches for a
+subscription that runs out and tells the person, or moves agents itself for a pair the person has armed. Its brief is
+`docs/profile-managers.md`; the site's policy (order, who may run where, groups that move together across hosts) is
+`<root>/.profiles/managers.conf`.
+
 **A workspace's name says who pays.** One ending in `-bedrock` uses a bedrock profile, and no other workspace
 does; ct warns at start when the two disagree.
 

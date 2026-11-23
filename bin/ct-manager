@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# ct-manager — keep agents running across several Claude subscriptions.
+#
+#   ct-manager status                 each managed profile: ok, or out of usage
+#                                     until when, and the workspaces on it
+#   ct-manager watch [<profile>]      wait until that profile's manager has work,
+#                                     print it, exit (run it in the background)
+#   ct-manager init <profile> [<ws>]  make the profile's manager workspace
+#                                     (<profile>-manager) and start its agent
+#   ct-manager peers <group> <profile> the managers on other hosts to tell when
+#                                     <group> moved to <profile>
+#
+# A profile is one Claude subscription (docs/workspace-conventions.md). When one
+# runs out of usage, its agents can move to another with `ct-profile switch`,
+# which keeps their conversations, memory and Remote Control history. A profile
+# manager is an agent in a profile of its own that watches for that and moves
+# agents, on the person's word or, for pairs they have armed, on its own. Its
+# brief is docs/profile-managers.md (installed as
+# ~/.local/share/ct/profile-managers.md).
+#
+# The policy is the site's, in <root>/.profiles/managers.conf (bash, sourced):
+#   MANAGED=(a b c)        the managed profiles, in order of preference
+#   STAYS=('*-manager' x)  workspaces that never move (globs)
+#   ONLY=([p]='glob ...')  profile p hosts only matching workspaces
+#   TOGETHER=([g]='ws ...') group g's workspaces always share one profile,
+#                          on whatever host each runs
+#   PEERS=([g]='name ...') managers on other hosts that move g's members there;
+#                          {profile} stands for the profile it moved to
+#   MIN_OUTAGE=0           an armed pair waits out a limit that resets sooner
+#                          than this (seconds); 0: it moves at once
+#   STAGGER=600            each later manager in MANAGED waits this much longer
+# Armed pairs, "<from> <to>" per line: <root>/.profiles/managers.armed.
+#
+# A profile is out when the newest usage-limit message in its transcripts
+# ("You've hit your weekly limit · resets Nov 23, 8pm (UTC)", which Claude Code
+# writes as a synthetic assistant turn) is newer than its newest real reply,
+# and its reset has not passed. A real reply after it means the limit is gone.
+set -uo pipefail
+
+root="${WORKSPACE_ROOT:-${CT_WORKSPACE_ROOT:-$HOME/dev}}"
+conf="$root/.profiles/managers.conf"
+armed_file="$root/.profiles/managers.armed"
+state_dir="$root/.profiles/.managers-state"
+die() { echo "ct-manager: $*" >&2; exit 2; }
+key() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '-'; }
+
+MANAGED=() STAYS=('*-manager') MIN_OUTAGE=0 STAGGER=600
+declare -A ONLY=() TOGETHER=() PEERS=()
+# shellcheck source=/dev/null
+[[ -f $conf ]] && . "$conf"
+if ((${#MANAGED[@]} == 0)); then   # no policy: every profile with a claude.ai login
+  for c in "$root"/.profiles/*/claude/.claude.json; do
+    [[ -e $c ]] && jq -e '.oauthAccount' "$c" >/dev/null 2>&1 && MANAGED+=("$(basename "$(dirname "$(dirname "$c")")")")
+  done
+fi
+
+# Globs on purpose: a STAYS or ONLY entry may be a pattern.
+# shellcheck disable=SC2053
+stays() { local g; for g in "${STAYS[@]}"; do [[ $1 == $g ]] && return 0; done; return 1; }
+# shellcheck disable=SC2053
+may_host() { # workspace profile
+  local g; [[ -n ${ONLY[$2]:-} ]] || return 0
+  for g in ${ONLY[$2]}; do [[ $1 == $g ]] && return 0; done; return 1
+}
+group_of() { local g w; for g in "${!TOGETHER[@]}"; do for w in ${TOGETHER[$g]}; do [[ $1 == "$w" ]] && { echo "$g"; return; }; done; done; }
+armed() { grep -qx "$1 $2" "$armed_file" 2>/dev/null; }
+
+reset_epoch() { # <limit text> <limit timestamp>: when it resets, or nothing
+  local t="${1#*resets }" lim day r
+  t="${t%% (UTC)*}"; t="${t//,/}"
+  lim=$(date -u -d "$2" +%s 2>/dev/null) || return 0
+  if [[ $t == [A-Z]* ]]; then                       # "Nov 23 8pm", "Nov 29"
+    r=$(date -u -d "$t UTC" +%s 2>/dev/null) || return 0
+    if ((r < lim - 86400)); then r=$(date -u -d "$t $(( $(date -u -d "$2" +%Y) + 1 )) UTC" +%s 2>/dev/null) || return 0; fi
+  else                                              # "4pm": the next one after the limit
+    day=$(date -u -d "$2" +%F)
+    r=$(date -u -d "$day $t UTC" +%s 2>/dev/null) || return 0
+    ((r <= lim)) && r=$((r + 86400))
+  fi
+  echo "$r"
+}
+
+scan() { # profile: newest real reply, newest limit, its text
+  local d f
+  for d in "$root/.profiles/$1/claude/projects"/*/; do
+    # shellcheck disable=SC2012  # newest by mtime; the names are session uuids
+    f=$(ls -t "$d"*.jsonl 2>/dev/null | head -1)
+    [[ -n $f ]] || continue
+    tail -n 400 "$f" | jq -r 'select(.type=="assistant") | [.timestamp,
+        (if .message.model == "<synthetic>" then ((.message.content[0].text // "") | gsub("\t";" ")) else "REAL" end)] | @tsv' 2>/dev/null
+  done | awk -F'\t' '
+    $2 == "REAL" { if ($1 > r) r = $1; next }
+    $2 ~ /hit your .*limit/ { if ($1 > l) { l = $1; lt = $2 } }
+    END { printf "%s\t%s\t%s\n", (r == "" ? "-" : r), (l == "" ? "-" : l), (lt == "" ? "-" : lt) }'
+}
+
+on_profile() { # profile: the workspaces whose .envrc names it
+  local e
+  for e in "$root"/*/.envrc; do
+    grep -qx "ct_profile=$1" "$e" 2>/dev/null && basename "$(dirname "$e")"
+  done | tr '\n' ' ' | sed 's/ $//'
+}
+
+status() { # one line per profile: name state reset hit workspaces (tab-separated)
+  local p real lim text state reset hit r now
+  now=$(date -u +%s)
+  for p in "${MANAGED[@]}"; do
+    IFS=$'\t' read -r real lim text < <(scan "$p")
+    state=ok reset=- hit=-
+    if [[ $lim != - && $lim > $real ]]; then
+      hit=$lim
+      r=$(reset_epoch "$text" "$lim")
+      if [[ -z $r ]] || ((now < r)); then state=out; fi
+      [[ -n $r && $state == out ]] && reset=$(date -u -d "@$r" +%FT%H:%MZ)
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$p" "$state" "$reset" "$hit" "$(on_profile "$p")"
+  done
+}
+
+last_is_limit() { # workspace profile: did its agent last stop on a usage limit?
+  local f
+  # shellcheck disable=SC2012  # newest by mtime; the names are session uuids
+  f=$(ls -t "$root/.profiles/$2/claude/projects/$(key "$root/$1")/"*.jsonl 2>/dev/null | head -1)
+  [[ -n $f ]] && tail -n 200 "$f" | jq -r 'select(.type=="assistant") | "\(.message.model)\t\(.message.content[0].text // "")"' 2>/dev/null |
+    tail -1 | grep -q "^<synthetic>	.*hit your .*limit"
+}
+
+# watch: print work for <me>'s manager and exit; nothing to do, check again.
+#   TAKE <workspace> <from> [<group>]   armed "<from> <me>": switch it to me now
+#   OUT <from> <reset> <workspaces>     nothing armed (or it resets soon): tell the
+#                                       person, once per outage, by the first
+#                                       manager that could take them
+#   SPLIT <group> <ws>=<profile> ...    a group's workspaces here are apart
+#   WAKE <manager>                      its profile reset, but it last stopped on
+#                                       the limit: message it to watch again
+watch() {
+  local me="${1:-}" p q ws g now left age first rank mine mark day
+  [[ -n $me ]] || me="$(basename "$(dirname "${CLAUDE_CONFIG_DIR:-}")")"
+  [[ " ${MANAGED[*]} " == *" $me "* ]] || die "'$me' is not a managed profile (MANAGED in $conf)"
+  mkdir -p "$state_dir"
+  while :; do
+    local -A st=() rs=() ht=() wss=() where=()
+    local -a out=()
+    while IFS=$'\t' read -r p s r h w; do
+      st[$p]=$s; rs[$p]=$r; ht[$p]=$h; wss[$p]=$w
+      for ws in $w; do where[$ws]=$p; done
+    done < <(status)
+    now=$(date -u +%s); day=$(date -u +%F)
+    if [[ ${st[$me]:-} == ok ]]; then
+      for p in "${MANAGED[@]}"; do
+        if [[ ${st[$p]} == out ]]; then
+          age=$((now - $(date -u -d "${ht[$p]}" +%s)))
+          left=$MIN_OUTAGE
+          [[ ${rs[$p]} != - ]] && left=$(( $(date -u -d "${rs[$p]}" +%s) - now ))
+          local -a movable=(); first=""
+          for ws in ${wss[$p]}; do
+            stays "$ws" && continue
+            movable+=("$ws")
+            g=$(group_of "$ws")
+            # who may take it: every member of its group must fit there
+            rank=0 mine=-1
+            for q in "${MANAGED[@]}"; do
+              [[ $q == "$p" || ${st[$q]} == out ]] && continue
+              may_host "$ws" "$q" || continue
+              if [[ -n $g ]]; then local m ok=1; for m in ${TOGETHER[$g]}; do may_host "$m" "$q" || ok=0; done; ((ok)) || continue; fi
+              [[ -z $first ]] && first=$q
+              armed "$p" "$q" || continue
+              [[ $q == "$me" ]] && mine=$rank
+              rank=$((rank + 1))
+            done
+            if ((left >= MIN_OUTAGE && mine >= 0 && age >= mine * STAGGER)); then out+=("TAKE $ws $p${g:+ $g}"); fi
+          done
+          # one report per outage: a profile and its reset, not the newest hit, which
+          # moves each time another of its agents hits the same limit
+          if [[ ${rs[$p]} != - ]]; then mark="$state_dir/out.$p.${rs[$p]}"
+          else mark="$state_dir/out.$p.$(date -u -d "${ht[$p]}" +%F)"; fi
+          if ((${#movable[@]})) && [[ $first == "$me" && ! -e $mark ]] && ! printf '%s\n' "${out[@]}" | grep -q " $p\( \|$\)"; then
+            if ((left < MIN_OUTAGE)) || ! armed "$p" "$first"; then
+              out+=("OUT $p ${rs[$p]} ${movable[*]}"); touch "$mark"
+            fi
+          fi
+        elif [[ $p != "$me" && -d $root/$p-manager && ! -e $state_dir/wake.$p.$day ]] && last_is_limit "$p-manager" "$p"; then
+          out+=("WAKE $p-manager"); touch "$state_dir/wake.$p.$day"
+        fi
+      done
+      # a group apart on this host: the first manager in MANAGED says so, daily
+      if [[ $me == "${MANAGED[0]}" ]]; then
+        for g in "${!TOGETHER[@]}"; do
+          local -a here=(); local profs=""
+          for ws in ${TOGETHER[$g]}; do
+            [[ -n ${where[$ws]:-} ]] || continue
+            here+=("$ws=${where[$ws]}"); [[ " $profs " == *" ${where[$ws]} "* ]] || profs+=" ${where[$ws]}"
+          done
+          if (($(wc -w <<<"$profs") > 1)) && [[ ! -e $state_dir/split.$g.$day ]]; then
+            out+=("SPLIT $g ${here[*]}"); touch "$state_dir/split.$g.$day"
+          fi
+        done
+      fi
+    fi
+    if ((${#out[@]})); then printf '%s\n' "${out[@]}"; return 0; fi
+    sleep "${CT_WATCH_INTERVAL:-60}"
+  done
+}
+
+# peers: the managers on other hosts that move <group>'s members there, for a
+# move to <profile> ({profile} in PEERS stands for it). Nothing: no peers.
+peers() {
+  local g="${1:-}" p="${2:-}" n
+  [[ -n $g && -n $p ]] || die "usage: ct-manager peers <group> <profile>"
+  for n in ${PEERS[$g]:-}; do echo "${n//\{profile\}/$p}"; done
+}
+
+# init: the profile's manager workspace, its brief linked in as CLAUDE.md,
+# trusted in the profile so it starts without a dialog, and its agent started.
+init() {
+  local p="${1:-}" ws="${2:-}" brief cfg
+  [[ -n $p ]] || die "usage: ct-manager init <profile> [<workspace>]"
+  [[ -d $root/.profiles/$p/claude ]] || die "no profile $p (ct-profile claude $p, and sign it in)"
+  ws="${ws:-$p-manager}"
+  brief="$HOME/.local/share/ct/profile-managers.md"
+  [[ -f $brief ]] || brief="$(dirname "$(readlink -f "$0")")/../docs/profile-managers.md"
+  [[ -f $brief ]] || die "no profile-managers.md brief (reinstall ct)"
+  mkdir -p "$root/$ws"
+  ln -sfn "$(readlink -f "$brief")" "$root/$ws/CLAUDE.md"
+  cfg="$root/.profiles/$p/claude/.claude.json"
+  [[ -f $cfg ]] || echo '{}' > "$cfg"
+  jq --arg k "$root/$ws" '.hasCompletedOnboarding = true
+    | .projects[$k] = ((.projects[$k] // {}) + {hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true})' \
+    "$cfg" > "$cfg.ct-tmp" && chmod 600 "$cfg.ct-tmp" && mv "$cfg.ct-tmp" "$cfg"
+  (cd "$root/$ws" && CT_PROFILE=$p CT_DETACH=1 "$(dirname "$(readlink -f "$0")")/ct" \
+    "You are the manager of the $p profile. Your brief is your CLAUDE.md. Start your watch in the background now, run ct-manager status once, and tell the person in two or three lines where every subscription stands.")
+}
+
+case "${1:-}" in
+  status) status ;;
+  watch)  shift; watch "$@" ;;
+  init)   shift; init "$@" ;;
+  peers)  shift; peers "$@" ;;
+  -h|--help|help) sed -n '2,/^set -uo/{/^set -uo/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
+  *) die "usage: ct-manager status | watch [<profile>] | init <profile> [<workspace>] | peers <group> <profile>" ;;
+esac
