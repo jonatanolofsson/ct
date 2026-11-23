@@ -11,7 +11,8 @@
 #              without a checkout (curl mode)
 #
 # What it does:
-#   1. installs bin/{ct,ct-autostart,ensure-nix,ct-scratch-guard,ct-profile} into CT_PREFIX
+#   1. installs bin/{ct,ct-autostart,ensure-nix,ct-scratch-guard,ct-profile,ct-manager} into CT_PREFIX,
+#      and docs/profile-managers.md into ~/.local/share/ct
 #   2. writes the generic workspace conventions into CT_HOME/CLAUDE.md inside
 #      a <!-- BEGIN ct-managed --> marker block (hand edits outside survive;
 #      site layers add their own block — see docs/bootstrap-integration.md)
@@ -54,10 +55,14 @@ fi
 
 # --- 1. binaries (replace only on success; old copies survive any failure) --
 mkdir -p "$CT_PREFIX"
-for tool in ct ct-autostart ensure-nix ct-scratch-guard ct-profile; do
+for tool in ct ct-autostart ensure-nix ct-scratch-guard ct-profile ct-manager; do
     install -m 0755 "$srcdir/bin/$tool" "$CT_PREFIX/$tool"
 done
-say "installed ct, ct-autostart, ensure-nix, ct-scratch-guard, ct-profile -> $CT_PREFIX"
+say "installed ct, ct-autostart, ensure-nix, ct-scratch-guard, ct-profile, ct-manager -> $CT_PREFIX"
+# The profile managers' brief, which ct-manager init links into each manager
+# workspace as its CLAUDE.md (docs/profile-managers.md).
+mkdir -p "$HOME/.local/share/ct"
+install -m 0644 "$srcdir/docs/profile-managers.md" "$HOME/.local/share/ct/profile-managers.md"
 
 # --- 2. workspace root + conventions block ---------------------------------
 mkdir -p "$CT_HOME"

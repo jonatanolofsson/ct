@@ -4,6 +4,8 @@
 #   DIRENV_STUB_LOG      file to append argv lines to (default: none)
 #   DIRENV_STUB_BLOCKED  set: `exec` fails as a blocked .envrc does, without
 #                        running the command, and `status` reports it blocked
+#   DIRENV_STUB_SOURCE   set: `exec DIR` loads DIR's .envrc first, as direnv
+#                        does (its stdlib calls are no-ops)
 echo "direnv $*" >> "${DIRENV_STUB_LOG:-/dev/null}"
 case "$1" in
   allow) exit 0 ;;
@@ -17,6 +19,14 @@ case "$1" in
       echo "direnv: error $2/.envrc is blocked. Run \`direnv allow\` to approve its content" >&2
       exit 1
     fi
-    shift 2; exec "$@" ;;
+    dir="$2"; shift 2
+    if [[ -n "${DIRENV_STUB_SOURCE:-}" && -f "$dir/.envrc" ]]; then
+      source_up_if_exists() { :; }; source_env_if_exists() { :; }; PATH_add() { :; }; watch_file() { :; }
+      here="$PWD"; cd "$dir" || exit 1
+      # shellcheck source=/dev/null
+      . ./.envrc
+      cd "$here" || exit 1
+    fi
+    exec "$@" ;;
 esac
 exit 0

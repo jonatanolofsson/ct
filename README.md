@@ -108,6 +108,12 @@ copies a workspace's conversations into it (with `--own-accounts`, so that Remot
 the profile's claude.ai account too). A workspace named `*-bedrock` should use a bedrock profile; ct warns
 when the name and the profile disagree.
 
+Several subscriptions: `ct-profile switch <workspace> <profile>` moves a running agent onto another one when its
+own runs out of usage, keeping every other login where it was. `ct-manager init <profile>` makes that profile's
+manager, an agent that watches for a subscription running out (`ct-manager watch`, `ct-manager status`) and moves
+agents on the person's word, or by itself for pairs they armed. Policy: `<root>/.profiles/managers.conf`; the
+manager's brief: `docs/profile-managers.md`.
+
 ### One OpenCode server, one terminal per workspace
 
 ct runs ONE OpenCode server per machine, `opencode serve` on a loopback port (`CT_OPENCODE_SERVER_PORT`,

@@ -335,3 +335,82 @@ owned_transcript() { # dir id: a conversation that also names its old account an
     [[ $output != *"set -euo"* ]]
   done
 }
+
+# A workspace that lives in profile $2, with ct's .envrc and one conversation there.
+ws_in_profile() { # workspace profile
+  local d="$HOME/dev/$1" key
+  mkdir -p "$d"
+  cat > "$d/.envrc" <<ENVRC
+ct_profile=$2
+if [[ -n \$ct_profile ]]; then logins="\${PWD%/*}/.profiles/\$ct_profile"; else logins="\$PWD/.config"; fi
+export CLOUDSDK_CONFIG="\$logins/gcloud"
+export GOOGLE_APPLICATION_CREDENTIALS="\$CLOUDSDK_CONFIG/application_default_credentials.json"
+if [[ -n \$ct_profile ]]; then export CLAUDE_CONFIG_DIR="\$logins/claude"; fi
+
+source_env_if_exists .envrc.local
+ENVRC
+  key="$(printf '%s' "$d" | tr -c 'A-Za-z0-9' '-')"
+  linked_transcript "$P/$2/claude/projects/$key" 22222222-2222-2222-2222-222222222222
+  echo "$key"
+}
+envrc_env() { (cd "$HOME/dev/$1" && DIRENV_STUB_SOURCE=1 direnv exec . sh -c 'echo "$CLAUDE_CONFIG_DIR|$CLOUDSDK_CONFIG|$GOOGLE_APPLICATION_CREDENTIALS"'); }
+
+@test "switch moves the agent onto the profile's Claude login, and pins its other logins where they were" {
+  export DIRENV_STUB_SOURCE=1
+  "$REPO/bin/ct-profile" claude old; signed_in old
+  "$REPO/bin/ct-profile" claude new; signed_in new
+  key="$(ws_in_profile work old)"
+  echo claude-work >> "$TMUX_STUB_SESSIONS"
+  run "$REPO/bin/ct-profile" switch work new
+  [ "$status" -eq 0 ]
+  grep -qx 'ct_profile=new' "$HOME/dev/work/.envrc"
+  [ "$(envrc_env work)" = "$P/new/claude|$P/old/gcloud|$P/old/gcloud/application_default_credentials.json" ]
+  [ "$(grep -c '^# >>> ct-profile switch' "$HOME/dev/work/.envrc")" = 1 ]
+  ls "$P/new/claude/projects/$key/"*.jsonl
+  jq -e '.projects["'"$HOME/dev/work"'"].hasTrustDialogAccepted and .hasCompletedOnboarding' "$P/new/claude/.claude.json"
+  grep -q 'kill-session -t =claude-work' "$TMUX_STUB_LOG"
+  grep -q 'new-session -d -s claude-work' "$TMUX_STUB_LOG"
+  [ ! -e "$HOME/.ct-noautostart" ]
+  ls "$HOME/dev/.profiles/.switch-backups/work.envrc."*
+}
+
+@test "switch back replaces its block and sets the target's earlier copy aside" {
+  export DIRENV_STUB_SOURCE=1
+  "$REPO/bin/ct-profile" claude old; signed_in old
+  "$REPO/bin/ct-profile" claude new; signed_in new
+  key="$(ws_in_profile work old)"
+  "$REPO/bin/ct-profile" switch work new
+  run "$REPO/bin/ct-profile" switch work old
+  [ "$status" -eq 0 ]
+  grep -qx 'ct_profile=old' "$HOME/dev/work/.envrc"
+  [ "$(envrc_env work)" = "$P/old/claude|$P/old/gcloud|$P/old/gcloud/application_default_credentials.json" ]
+  ! grep -q '^export' <(sed -n '/^# >>> ct-profile switch/,/^# <<< ct-profile switch/p' "$HOME/dev/work/.envrc")
+  [ "$(grep -c '^# >>> ct-profile switch' "$HOME/dev/work/.envrc")" = 1 ]
+  ls -d "$P/old/claude/projects/$key.superseded-"*
+  [ "$(ls "$P/old/claude/projects/$key/"*.jsonl | wc -l)" = 1 ]
+}
+
+@test "switch leaves an agent that is mid-turn alone, and says to try again" {
+  "$REPO/bin/ct-profile" claude old; signed_in old
+  "$REPO/bin/ct-profile" claude new; signed_in new
+  ws_in_profile work old >/dev/null
+  echo claude-work >> "$TMUX_STUB_SESSIONS"
+  export TMUX_STUB_SCREENS="$BATS_TEST_TMPDIR/screens"; mkdir -p "$TMUX_STUB_SCREENS"
+  printf '✻ Working… (3s · esc to interrupt)\n' > "$TMUX_STUB_SCREENS/claude-work"
+  run "$REPO/bin/ct-profile" switch work new
+  [ "$status" -eq 3 ]
+  grep -qx 'ct_profile=old' "$HOME/dev/work/.envrc"
+  ! grep -q kill-session "$TMUX_STUB_LOG"
+}
+
+@test "switch to a profile that is not signed in is refused before the agent is stopped" {
+  "$REPO/bin/ct-profile" claude old; signed_in old
+  "$REPO/bin/ct-profile" claude new
+  ws_in_profile work old >/dev/null
+  echo claude-work >> "$TMUX_STUB_SESSIONS"
+  run "$REPO/bin/ct-profile" switch work new
+  [ "$status" -eq 2 ]
+  [[ $output == *"new is not signed in"* ]]
+  ! grep -q kill-session "$TMUX_STUB_LOG"
+  grep -qx 'ct_profile=old' "$HOME/dev/work/.envrc"
+}

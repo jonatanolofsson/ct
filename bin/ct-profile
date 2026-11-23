@@ -9,6 +9,9 @@
 #                                      the profile's claude.ai account is also
 #                                      the person's (see move below)
 #        [--from <profile>]            ...from another profile, not ~/.claude
+#   ct-profile switch <workspace> <name> move a running agent onto that profile's
+#                                      Claude login, its other logins pinned
+#                                      where they are (a profile manager's move)
 #
 # A profile is <root>/.profiles/<name>/ (docs/workspace-conventions.md); a
 # workspace naming it in its .envrc gets CLAUDE_CONFIG_DIR=<profile>/claude.
@@ -187,6 +190,96 @@ own_copy() { # src dst old-id new-id: one transcript, rewritten for the profile'
   touch -r "$1" "$2"   # ct resumes the newest transcript: keep their order
 }
 
+# switch: move a workspace's running agent onto another profile's Claude login,
+# and only that. A workspace that already lives in a profile (ct_profile= in its
+# .envrc) gets the target's Claude: its conversations move with --own-accounts,
+# so Remote Control shows their history under the new account. Every OTHER
+# login its .envrc sets (gcloud and the rest, which also follow ct_profile=) is
+# pinned where it was, in a marked block, so the accounts the agent reaches
+# never change with the subscription. This is what a profile manager runs when
+# a subscription is out of usage (ct-manager, docs/profile-managers.md).
+#
+# Exit 0 moved (or already there), 3 the agent is mid-turn (try again when it is
+# idle), 2 refused. One switch at a time per root: a lock in .profiles/.
+switch_ws() { # workspace profile
+  local ws="${1:-}" to="${2:-}" d from before line name block="" note tp k cfg src sw
+  [[ $# -eq 2 ]] || die "usage: ct-profile switch <workspace> <profile>"
+  [[ -d $ws || ! -d $root/$ws ]] || ws="$root/$ws"
+  [[ -f $ws/.envrc ]] || die "no workspace $ws with an .envrc"
+  d="$(cd "$ws" && pwd)"
+  mkdir -p "$root/.profiles"
+  exec 9>"$root/.profiles/.switch.lock"
+  flock -w "${CT_SWITCH_WAIT:-900}" 9 || die "another switch holds $root/.profiles/.switch.lock"
+  from="$(sed -n 's/^ct_profile=//p' "$d/.envrc" | head -1)"
+  [[ -n $from ]] || die "${d##*/} names no profile (ct_profile= in its .envrc)"
+  [[ $from != "$to" ]] || { echo "ct-profile: ${d##*/} is on $to already" >&2; return 0; }
+  [[ -d $root/.profiles/$to/claude ]] || die "no profile $to (ct-profile claude $to first)"
+  jq -e '.oauthAccount.organizationUuid // empty' "$root/.profiles/$to/claude/.claude.json" >/dev/null 2>&1 ||
+    die "$to is not signed in (CLAUDE_CONFIG_DIR=$root/.profiles/$to/claude claude auth login)"
+  sw="claude-$(ws_key "$d")"
+  if tmux has-session -t "=$sw" 2>/dev/null && tmux capture-pane -p -t "$sw:" 2>/dev/null | grep -q 'esc to interrupt'; then
+    echo "ct-profile: ${d##*/} is mid-turn; switch it when it is idle" >&2; exit 3
+  fi
+
+  # The login variables: the usual ones, and every one the .envrc exports.
+  local -a vars
+  mapfile -t vars < <({ echo CLOUDSDK_CONFIG; echo GOOGLE_APPLICATION_CREDENTIALS
+    sed -n 's/^export \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$d/.envrc"; } | grep -vx CLAUDE_CONFIG_DIR | sort -u)
+  envof() { (cd "$d" && direnv exec . env 2>/dev/null) | grep -E "^($(IFS='|'; echo "${vars[*]}"))=" | sort; }
+  before="$(envof)"
+
+  # Trust and onboarding in the target, so the agent starts without a dialog.
+  cfg="$root/.profiles/$to/claude/.claude.json"; src="$root/.profiles/$from/claude/.claude.json"
+  [[ -f $src ]] || src=/dev/null
+  [[ -f $cfg ]] || echo '{}' > "$cfg"
+  jq --slurpfile s <(cat "$src" 2>/dev/null || echo '{}') --arg k "$d" '
+    .hasCompletedOnboarding = true
+    | .projects[$k] = ((.projects[$k] // {}) + (($s[0] // {}).projects[$k] // {})
+                       + {hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true})' \
+    "$cfg" > "$cfg.ct-tmp"
+  chmod 600 "$cfg.ct-tmp"; mv "$cfg.ct-tmp" "$cfg"
+
+  # Stop the agent, with ct-autostart held off for the moment of the move.
+  # A global, not a local: the EXIT trap reads it after this function returns.
+  # shellcheck disable=SC2034
+  switch_paused=0
+  # shellcheck disable=SC2034
+  if [[ ! -e $HOME/.ct-noautostart ]]; then touch "$HOME/.ct-noautostart"; switch_paused=1; fi
+  trap 'if ((switch_paused)); then rm -f "$HOME/.ct-noautostart"; fi' EXIT
+  tmux kill-session -t "=$sw" 2>/dev/null || true
+  sleep "${CT_SWITCH_SETTLE:-2}"
+
+  # A copy left from an earlier stay in the target would make the move refuse
+  # (it never writes the same conversation twice): set it aside, dated.
+  k="$(key "$d")"; tp="$root/.profiles/$to/claude/projects/$k"
+  if has_transcripts "$tp"; then mv "$tp" "$tp.superseded-$(date -u +%Y%m%dT%H%M%S)"; fi
+  move "$d" "$to" --own-accounts --from "$from"
+
+  mkdir -p "$root/.profiles/.switch-backups"
+  cp "$d/.envrc" "$root/.profiles/.switch-backups/${d##*/}.envrc.$(date -u +%Y%m%dT%H%M%S)"
+  sed -i "s/^ct_profile=.*/ct_profile=$to/" "$d/.envrc"
+  perl -0pi -e 's/^# >>> ct-profile switch\b.*?^# <<< ct-profile switch[^\n]*\n\n?//msg' "$d/.envrc"
+  direnv allow "$d" >/dev/null 2>&1 || true
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    name="${line%%=*}"
+    grep -qxF "$line" <<<"$(envof)" || block+="export $name=\"${line#*=}\""$'\n'
+  done <<<"$before"
+  note="# >>> ct-profile switch: Claude on $to since $(date -u +%F), from $from; other logins stay where they were
+${block}# <<< ct-profile switch"
+  if grep -q '^source_env_if_exists \.envrc\.local' "$d/.envrc"; then
+    NOTE="$note" perl -0pi -e 's/^(source_env_if_exists \.envrc\.local)/$ENV{NOTE}\n\n$1/m' "$d/.envrc"
+  else
+    printf '\n%s\n' "$note" >> "$d/.envrc"
+  fi
+  direnv allow "$d" >/dev/null 2>&1 || true
+  [[ "$(envof)" == "$before" ]] || die "${d##*/}: its logins would change; the old .envrc is in $root/.profiles/.switch-backups"
+
+  (cd "$d" && CT_DETACH=1 "$(dirname "$(readlink -f "$0")")/ct" >/dev/null 2>&1) ||
+    die "${d##*/} moved to $to, but ct could not start it"
+  echo "ct-profile: ${d##*/} moved from $from to $to and started" >&2
+}
+
 copy_history() { # old-id new-id profile: the checkpoints /rewind restores from
   local src="$from_cfg/file-history/$1" dst="$root/.profiles/$3/claude/file-history/$2"
   [[ -d $src && ! -e $dst ]] || return 0
@@ -226,6 +319,7 @@ new_id() {
 case "${1:-}" in
   claude) shift; [[ $# -ge 1 ]] || die "usage: ct-profile claude <name> [bedrock]"; claude_profile "$@" ;;
   move)   shift; move "$@" ;;
+  switch) shift; switch_ws "$@" ;;
   -h|--help|help) sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
-  *) die "usage: ct-profile claude <name> [bedrock] | move <workspace> <name> [--own-accounts] [--from <profile>]" ;;
+  *) die "usage: ct-profile claude <name> [bedrock] | move <workspace> <name> [--own-accounts] [--from <profile>] | switch <workspace> <name>" ;;
 esac
