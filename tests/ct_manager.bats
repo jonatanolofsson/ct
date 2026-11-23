@@ -53,13 +53,14 @@ watch_as() { run timeout 5 "$REPO/bin/ct-manager" watch "$1"; }
 
 @test "watch: with nothing armed, the first manager that could take them says OUT, once" {
   ws w1 a; ws w2 a; ws a-manager a
-  said a w1 '-10 min' "$(weekly '+2 days')"
+  limit="$(weekly '+2 days')"   # one outage, one reset text, even across an hour
+  said a w1 '-10 min' "$limit"
   watch_as b
   [ "$status" -eq 0 ]
   [[ $output == "OUT a "*" w1 w2" ]]
   watch_as b
   [ "$status" -eq 124 ]
-  said a w2 '-1 min' "$(weekly '+2 days')"   # another agent hits the same limit later
+  said a w2 '-1 min' "$limit"   # another agent hits the same limit later
   watch_as b
   [ "$status" -eq 124 ]
   watch_as c
