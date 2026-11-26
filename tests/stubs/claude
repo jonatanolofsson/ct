@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 # claude stub: records argv (used by ct-autostart's warm-up; ct itself only
 # ever hands the string to tmux), and which Claude config the call ran with.
+# CLAUDE_STUB_FAILS=<file holding N>: the next N calls fail as an expired
+# login does, each one counting the file down.
 echo "claude $* [config=${CLAUDE_CONFIG_DIR:-~/.claude}]" >> "${CLAUDE_STUB_LOG:-/dev/null}"
+if [[ -n "${CLAUDE_STUB_FAILS:-}" && -f $CLAUDE_STUB_FAILS ]]; then
+  n=$(cat "$CLAUDE_STUB_FAILS")
+  if (( n > 0 )); then
+    echo $((n - 1)) > "$CLAUDE_STUB_FAILS"
+    echo "OAuth token has expired. Please run /login · token sk-ant-oat01-secretsecret"
+    exit 1
+  fi
+fi
 exit 0

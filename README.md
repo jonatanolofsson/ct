@@ -34,6 +34,7 @@ Settings are environment variables, never flags. Every argument is forwarded to 
 | `CT_BEDROCK_SETTINGS` | for `ct-profile claude <name> bedrock`: the site's Claude settings for its Bedrock backend (a JSON file merged into the profile's) |
 | `CT_SESSION_ID` + `CT_NAME` | pin one claude conversation by id, run from its own directory (see below) |
 | `CT_WAKE` | `0`: ct-autostart wakes nobody with a message (see below) |
+| `CT_AUTOSTART_LOGIN_RETRY` | seconds ct-autostart waits between tries of a failing Claude login at start (default `30 60 120 300 600 900`); while it fails, `~/.ct-login-needed` says what to do, and `--loop` restarts the agents that started without it once it works |
 | `CT_KEEP_MODE` | resume a conversation in the permission mode it was left in, even accept-edits or manual (see below) |
 | `CT_KEEP_MODEL` | resume a conversation on the model and effort Claude picks, not the ones it last ran with |
 
