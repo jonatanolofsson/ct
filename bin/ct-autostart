@@ -387,7 +387,7 @@ run_round() {
 #
 # Once per Claude config (ct >= 0.10: a profile carries its own login): every
 # account profile's agents would otherwise refresh ITS token together. A config
-# with no claude.ai login (a bedrock profile: a key helper, no token) has
+# with no claude.ai login (a gateway profile: a key helper, no token) has
 # nothing to refresh and is skipped.
 claude_configs() { # the distinct config dirs of the workspaces that run claude
   local u a _port _name _lbl _display dir _sid us=()

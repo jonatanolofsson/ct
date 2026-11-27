@@ -31,7 +31,7 @@ Settings are environment variables, never flags. Every argument is forwarded to 
 | `CT_OPENCODE_WEB` | URL printed for the OpenCode web UI; `{port}` is replaced by the server's port |
 | `CT_WORKSPACE_ROOT` | a single workspace root instead of `~/dev` and `~/workspaces` |
 | `CT_PROFILE` | at a workspace's first launch: share the named login profile (see below) instead of its own logins |
-| `CT_BEDROCK_SETTINGS` | for `ct-profile claude <name> bedrock`: the site's Claude settings for its Bedrock backend (a JSON file merged into the profile's) |
+| `CT_GATEWAY_SETTINGS` | for `ct-profile new <name> gateway`: the site's Claude settings for its gateway (a JSON file merged into the profile's) |
 | `CT_SESSION_ID` + `CT_NAME` | pin one claude conversation by id, run from its own directory (see below) |
 | `CT_WAKE` | `0`: ct-autostart wakes nobody with a message (see below) |
 | `CT_AUTOSTART_LOGIN_RETRY` | seconds ct-autostart waits between tries of a failing Claude login at start (default `30 60 120 300 600 900`); while it fails, `~/.ct-login-needed` says what to do, and `--loop` restarts the agents that started without it once it works |
@@ -104,13 +104,14 @@ it, rather than not at all. See the conventions, "Logins belong to a workspace o
 
 A profile also carries a Claude Code identity: the `.envrc` points `CLAUDE_CONFIG_DIR` at
 `<root>/.profiles/<name>/claude`, so a profile has its own claude.ai login or its own backend, settings and
-conversations, and ct resumes from there. `ct-profile claude <name> [bedrock]` sets one up and `ct-profile move`
-copies a workspace's conversations into it (with `--own-accounts`, so that Remote Control shows their history under
-the profile's claude.ai account too). A workspace named `*-bedrock` should use a bedrock profile; ct warns
-when the name and the profile disagree.
+conversations, and ct resumes from there. `ct-profile new <name> [subscription|gateway]` sets one up, and
+`ct-profile transfer <workspace> <profile>` moves a workspace's agent onto it: stops it, brings its conversations
+along (relinked to a subscription profile's own account, so Remote Control shows their history there), points the
+workspace at the profile with every other login pinned where it was, and starts it again. A gateway profile runs
+Claude through the site's gateway, and has no Remote Control: Claude Code offers that only through
+`api.anthropic.com`.
 
-Several subscriptions: `ct-profile switch <workspace> <profile>` moves a running agent onto another one when its
-own runs out of usage, keeping every other login where it was. `ct-manager init <profile>` makes that profile's
+Several subscriptions: a profile manager transfers agents onto another one when theirs runs out of usage. `ct-manager init <profile>` makes that profile's
 manager, an agent that watches for a subscription running out (`ct-manager watch`, `ct-manager status`) and moves
 agents on the person's word, or by itself for pairs they armed. Policy: `<root>/.profiles/managers.conf`; the
 manager's brief: `docs/profile-managers.md`.

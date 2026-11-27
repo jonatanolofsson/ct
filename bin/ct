@@ -288,26 +288,6 @@ claude_dir() { # workspace dir -> config dir
   if [[ -n $p ]]; then printf '%s/.profiles/%s/claude' "${1%/*}" "$p"; else printf '%s/.claude' "$HOME"; fi
 }
 
-# A workspace's name says who pays (the site's conventions): one ending in
-# -bedrock runs Claude on a profile set up for Bedrock (`ct-profile claude
-# <name> bedrock`, which marks its settings ct_profile_kind: bedrock), and no
-# other workspace does. Disagreeing is a warning, not a refusal: the person may
-# be mid-move, and an agent that will not start helps nobody.
-claude_billing_check() {
-  local cfg kind=account
-  ((in_root)) || return 0
-  cfg="$(claude_dir "$agent_ws")/settings.json"
-  if [[ -f $cfg ]] && command -v jq >/dev/null 2>&1; then
-    kind=$(jq -r '.ct_profile_kind // "account"' "$cfg" 2>/dev/null || echo account)
-  fi
-  if [[ ${agent_ws##*/} == *-bedrock && $kind != bedrock ]]; then
-    echo "ct: WARNING: ${agent_ws##*/} is named -bedrock but its Claude ($cfg) is not a bedrock profile — it bills the account it is signed in to" >&2
-  elif [[ ${agent_ws##*/} != *-bedrock && $kind == bedrock ]]; then
-    echo "ct: WARNING: ${agent_ws##*/} runs Claude on a bedrock profile but is not named -bedrock" >&2
-  fi
-  return 0
-}
-
 # Where Claude keeps a directory's transcripts: <config>/projects/<key>, where
 # the key is the absolute path with EVERY character that is not a letter or a
 # digit turned into '-' (so `/a/.claude/b c` is `-a--claude-b-c`). Replacing
@@ -796,7 +776,6 @@ else
 fi
 ws_envrc_write
 ws_envrc_migrate
-claude_billing_check
 cmd="$(ws_exec_prefix)$cmd"
 tmux new-session -d -s "$name" -c "$workspace" \
   -e "CT_WORKSPACE=$agent_ws" -e "WORKSPACE_ROOT=$agent_root" "$cmd"
