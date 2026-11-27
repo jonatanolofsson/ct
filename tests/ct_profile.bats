@@ -12,6 +12,7 @@ setup() {
   ct_envrc agent-alpha ""
   echo '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"ct-scratch-guard"}]}]},"plansDirectory":".claude/plans"}' > "$HOME/.claude/settings.json"
   export TMUX_STUB_LOG="$BATS_TEST_TMPDIR/tmux.log" TMUX_STUB_SESSIONS="$BATS_TEST_TMPDIR/sessions" CT_DETACH=1
+  export DIRENV_STUB_SOURCE=1   # load each .envrc as direnv does: transfer reads what it exports
   : > "$TMUX_STUB_LOG"; : > "$TMUX_STUB_SESSIONS"
   P="$HOME/dev/.profiles"
 }
@@ -411,4 +412,41 @@ envrc_env() { (cd "$HOME/dev/$1" && DIRENV_STUB_SOURCE=1 direnv exec . sh -c 'ec
   [ "$status" -eq 2 ]
   [[ $output == *"has no ct_profile= line"* ]]
   ! grep -q kill-session "$TMUX_STUB_LOG"
+}
+
+@test "an older .envrc without the Claude line gets it in the transfer's block, so Claude really moves" {
+  "$REPO/bin/ct-profile" new acme; signed_in acme
+  cat > "$HOME/dev/agent-alpha/.envrc" <<'ENVRC'
+ct_profile=
+if [[ -n $ct_profile ]]; then logins="${PWD%/*}/.profiles/$ct_profile"; else logins="$PWD/.config"; fi
+export CLOUDSDK_CONFIG="$logins/gcloud"
+ENVRC
+  run "$REPO/bin/ct-profile" transfer agent-alpha acme
+  [ "$status" -eq 0 ]
+  grep -qx "export CLAUDE_CONFIG_DIR=\"$P/acme/claude\"" "$HOME/dev/agent-alpha/.envrc"
+  [ "$(cd "$HOME/dev/agent-alpha" && direnv exec . sh -c 'echo "$CLAUDE_CONFIG_DIR|$CLOUDSDK_CONFIG"')" = "$P/acme/claude|$HOME/dev/agent-alpha/.config/gcloud" ]
+}
+
+@test "back on a gateway it was on before, a conversation's newer files are merged in, not skipped" {
+  gateway gw1; gateway gw2
+  key="$(printf '%s' "$HOME/dev/agent-alpha" | tr -c 'A-Za-z0-9' '-')"; id=s1
+  mkdir -p "$HOME/.claude/projects/$key" "$HOME/.claude/uploads/$id"
+  echo one > "$HOME/.claude/uploads/$id/a-one.pdf"
+  echo '{"type":"user","sessionId":"s1"}' > "$HOME/.claude/projects/$key/$id.jsonl"
+  "$REPO/bin/ct-profile" transfer agent-alpha gw1
+  "$REPO/bin/ct-profile" transfer agent-alpha gw2
+  echo two > "$P/gw2/claude/uploads/$id/b-two.pdf"            # attached while on gw2
+  run "$REPO/bin/ct-profile" transfer agent-alpha gw1
+  [ "$status" -eq 0 ]
+  [ -f "$P/gw1/claude/uploads/$id/a-one.pdf" ]
+  [ -f "$P/gw1/claude/uploads/$id/b-two.pdf" ]
+}
+
+@test "a relinking transfer between two different login addresses says whose account the history moves to" {
+  "$REPO/bin/ct-profile" new acme
+  echo '{"oauthAccount":{"accountUuid":"acct-new","organizationUuid":"'"$NEW_ORG"'","emailAddress":"b@example.org"}}' > "$P/acme/claude/.claude.json"
+  echo '{"oauthAccount":{"emailAddress":"a@example.com"}}' > "$HOME/.claude.json"
+  run "$REPO/bin/ct-profile" transfer agent-alpha acme
+  [ "$status" -eq 0 ]
+  [[ $output == *"history moves from a@example.com's account to b@example.org's"* ]]
 }

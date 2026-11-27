@@ -169,7 +169,7 @@ own_copy() { # src dst old-id new-id: one transcript, rewritten for the profile'
 # Exit 0 transferred (or already there), 3 the agent is mid-turn (try again when
 # it is idle), 2 refused. One transfer at a time per root: a lock in .profiles/.
 transfer() { # workspace profile
-  local ws="${1:-}" to="${2:-}" d from before line name block="" note tp k cfg src sw org="" from_label
+  local ws="${1:-}" to="${2:-}" d from before line name block="" note tp k cfg src sw org="" from_label bak want who_from who_to
   [[ $# -eq 2 ]] || die "usage: ct-profile transfer <workspace> <profile>"
   [[ -d $ws || ! -d $root/$ws ]] || ws="$root/$ws"
   [[ -f $ws/.envrc ]] || die "no workspace $ws with an .envrc"
@@ -189,6 +189,14 @@ transfer() { # workspace profile
   if jq -e '.oauthAccount.organizationUuid // empty' "$root/.profiles/$to/claude/.claude.json" >/dev/null 2>&1; then
     org="$(jq -r '.oauthAccount.organizationUuid' "$root/.profiles/$to/claude/.claude.json")"
     [[ $org =~ ^[0-9a-f-]{36}$ ]] || die "$to's login names no organization"
+    # Relinking hands the conversations' history to the target's account. Say so
+    # when the two logins are different addresses: one person's accounts often
+    # are, but two people's always are.
+    who_from="$(jq -r '.oauthAccount.emailAddress // empty' "$src" 2>/dev/null || true)"
+    who_to="$(jq -r '.oauthAccount.emailAddress // empty' "$root/.profiles/$to/claude/.claude.json" 2>/dev/null || true)"
+    if [[ -n $who_from && -n $who_to && $who_from != "$who_to" ]]; then
+      echo "ct-profile: note: ${d##*/}'s history moves from $who_from's account to $who_to's; transfer only between one person's own accounts" >&2
+    fi
   elif ! jq -e '.ct_profile_kind == "gateway" or .ct_profile_kind == "bedrock"' "$root/.profiles/$to/claude/settings.json" >/dev/null 2>&1; then
     die "$to is not signed in (CLAUDE_CONFIG_DIR=$root/.profiles/$to/claude claude auth login)"
   fi
@@ -201,7 +209,11 @@ transfer() { # workspace profile
   local -a vars
   mapfile -t vars < <({ echo CLOUDSDK_CONFIG; echo GOOGLE_APPLICATION_CREDENTIALS
     sed -n 's/^export \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$d/.envrc"; } | grep -vx CLAUDE_CONFIG_DIR | sort -u)
-  envof() { (cd "$d" && direnv exec . env 2>/dev/null) | grep -E "^($(IFS='|'; echo "${vars[*]}"))=" | sort; }
+  # `|| true`: an environment that sets none of them is an answer too, not an
+  # error that ends the transfer under `set -e`.
+  envof() { { (cd "$d" && direnv exec . env 2>/dev/null) | grep -E "^($(IFS='|'; echo "${vars[*]}"))=" || true; } | sort; }
+  # shellcheck disable=SC2016  # expanded by the inner shell, in the .envrc's environment
+  claude_of() { (cd "$d" && direnv exec . sh -c 'printf %s "${CLAUDE_CONFIG_DIR:-}"' 2>/dev/null) || true; }
   before="$(envof)"
 
   # Trust and onboarding in the target, so the agent starts without a dialog.
@@ -233,7 +245,8 @@ transfer() { # workspace profile
   copy_conversations "$d" "$to" "$org"
 
   mkdir -p "$root/.profiles/.transfer-backups"
-  cp "$d/.envrc" "$root/.profiles/.transfer-backups/${d##*/}.envrc.$(date -u +%Y%m%dT%H%M%S)"
+  bak="$root/.profiles/.transfer-backups/${d##*/}.envrc.$(date -u +%Y%m%dT%H%M%S)"
+  cp "$d/.envrc" "$bak"
   sed -i "s/^ct_profile=.*/ct_profile=$to/" "$d/.envrc"
   perl -0pi -e 's/^# >>> ct-profile transfer\b.*?^# <<< ct-profile transfer[^\n]*\n\n?//msg' "$d/.envrc"
   direnv allow "$d" >/dev/null 2>&1 || true
@@ -242,6 +255,11 @@ transfer() { # workspace profile
     name="${line%%=*}"
     grep -qxF "$line" <<<"$(envof)" || block+="export $name=\"${line#*=}\""$'\n'
   done <<<"$before"
+  # An older .envrc has no line that points Claude at the profile (the
+  # conventions say to add one); without it the agent would start on its old
+  # Claude, and resume nothing, under a message that says it moved.
+  want="$root/.profiles/$to/claude"
+  [[ "$(claude_of)" == "$want" ]] || block+="export CLAUDE_CONFIG_DIR=\"$want\""$'\n'
   note="# >>> ct-profile transfer: Claude on $to since $(date -u +%F), from $from_label; other logins stay where they were
 ${block}# <<< ct-profile transfer"
   if grep -q '^source_env_if_exists \.envrc\.local' "$d/.envrc"; then
@@ -250,17 +268,23 @@ ${block}# <<< ct-profile transfer"
     printf '\n%s\n' "$note" >> "$d/.envrc"
   fi
   direnv allow "$d" >/dev/null 2>&1 || true
-  [[ "$(envof)" == "$before" ]] || die "${d##*/}: its logins would change; the old .envrc is in $root/.profiles/.transfer-backups"
+  if [[ "$(envof)" != "$before" || "$(claude_of)" != "$want" ]]; then
+    cp "$bak" "$d/.envrc"; direnv allow "$d" >/dev/null 2>&1 || true
+    die "${d##*/}: its .envrc would not point Claude at $to and keep its other logins; it is put back as it was ($bak), and the conversations are copied to $to already"
+  fi
 
   (cd "$d" && CT_DETACH=1 "$(dirname "$(readlink -f "$0")")/ct" >/dev/null 2>&1) ||
     die "${d##*/} transferred to $to, but ct could not start it"
   echo "ct-profile: ${d##*/} transferred from $from_label to $to and started" >&2
 }
 
+# Both merge into what the target already holds: a plain copy keeps the
+# conversation's id, so a workspace that was on this profile before finds its
+# old folder there, and what was added since must not be skipped.
 copy_history() { # old-id new-id profile: the checkpoints /rewind restores from
   local src="$from_cfg/file-history/$1" dst="$root/.profiles/$3/claude/file-history/$2"
-  [[ -d $src && ! -e $dst ]] || return 0
-  mkdir -p "${dst%/*}"; cp -a "$src" "$dst"
+  [[ -d $src ]] || return 0
+  mkdir -p "$dst"; cp -a "$src/." "$dst/"
 }
 
 # The files the person attached (PDFs, screenshots) live beside the transcript,
@@ -269,8 +293,8 @@ copy_history() { # old-id new-id profile: the checkpoints /rewind restores from
 # again, and under a new id its paths name a folder that does not exist.
 copy_uploads() { # old-id new-id profile
   local src="$from_cfg/uploads/$1" dst="$root/.profiles/$3/claude/uploads/$2"
-  [[ -d $src && ! -e $dst ]] || return 0
-  mkdir -p "${dst%/*}"; cp -a "$src" "$dst"
+  [[ -d $src ]] || return 0
+  mkdir -p "$dst"; cp -a "$src/." "$dst/"
 }
 
 # A sed script that points the transcript's upload paths at the profile's copy:
