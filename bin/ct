@@ -636,6 +636,14 @@ ct_pick_session() {
   basename "$best" .jsonl
 }
 
+# ct-autostart writes ~/.ct-login-needed while a Claude login fails at start
+# (its warm-up), and removes it once the login works. Say so to whoever starts
+# an agent by hand: they are the one who can sign in.
+if [[ -s "$HOME/.ct-login-needed" ]]; then
+  echo "ct: WARNING: a Claude login is not working, so agents started now get no Remote Control:" >&2
+  sed 's/^/  /' "$HOME/.ct-login-needed" >&2
+fi
+
 resuming=0
 for a in "$@"; do
   case "$a" in -c|--continue|-r|--resume|--resume=*|--fork-session) resuming=1 ;; esac

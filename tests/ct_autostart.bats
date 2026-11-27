@@ -14,7 +14,7 @@ setup() {
   export CT_AUTOSTART_STAGGER=0
   # The suite must not inherit the caller's ct settings: an agent started BY
   # ct-autostart runs with CT_AUTOSTART_GLOB set, and the defaults are under test.
-  unset CT_AUTOSTART_GLOB CT_AUTOSTART_FORCE CT_AUTOSTART_INTERVAL CT_AUTOSTART_RETRY CT_AUTOSTART_DIALOG_RE CT_WORKSPACE_ROOT CT_FRESH CT_DETACH CT_AGENT CT_WAKE CT_WAKE_SINCE CT_WAKE_FILE CT_OPENCODE_WEB CT_OPENCODE_SERVER_PORT CURL_STUB_FAIL CURL_STUB_HEALTH_FAILS CURL_STUB_SESSIONS
+  unset CT_AUTOSTART_GLOB CT_AUTOSTART_FORCE CT_AUTOSTART_INTERVAL CT_AUTOSTART_RETRY CT_AUTOSTART_LOGIN_RETRY CLAUDE_STUB_FAILS CT_AUTOSTART_DIALOG_RE CT_WORKSPACE_ROOT CT_FRESH CT_DETACH CT_AGENT CT_WAKE CT_WAKE_SINCE CT_WAKE_FILE CT_OPENCODE_WEB CT_OPENCODE_SERVER_PORT CURL_STUB_FAIL CURL_STUB_HEALTH_FAILS CURL_STUB_SESSIONS
   # transcript dir names are the cwd with / -> -  (they START with a hyphen)
   mktranscript() {
     local ws="$1"; local key; key="$HOME/.claude/projects/$(printf '%s' "$ws" | tr -c 'A-Za-z0-9' '-')"
@@ -447,4 +447,60 @@ mkpin() { # name session-id dir
   [[ $output == *"--loop"* && $output == *"--supervise"* && $output == *"ct-noautostart"* ]]
   [[ $output != *"#"* ]]
   ! grep -q 'new-session' "$TMUX_STUB_LOG" 2>/dev/null
+}
+
+@test "a failed warm-up is tried again until the login works, and says what to do meanwhile" {
+  touch "$HOME/.ct-autostart"
+  mktranscript "$HOME/dev/agent-one"
+  echo 2 > "$BATS_TEST_TMPDIR/fails"
+  run env CLAUDE_STUB_FAILS="$BATS_TEST_TMPDIR/fails" CT_AUTOSTART_LOGIN_RETRY="0 0 0" "$REPO/bin/ct-autostart"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'claude -p ok' "$CLAUDE_STUB_LOG")" -eq 3 ]
+  [[ "$output" == *"credential warm-up failed (~/.claude): OAuth token has expired. Please run /login · token <redacted> — trying again in 0s (1 of 3)"* ]]
+  [[ "$output" == *"credential warm-up ok (~/.claude)"* ]]
+  [[ "$output" != *secretsecret* ]]
+  [ ! -e "$HOME/.ct-login-needed" ]                    # gone once it works
+  [ ! -e "$HOME/.local/share/ct/login-failed/-$(printf '%s' "$HOME/.claude" | tr -c 'A-Za-z0-9' '-' | cut -c2-)" ]
+  [[ "$output" == *"agent-one: started"* ]]
+}
+
+@test "a login that keeps failing: agents start, are written down, and ~/.ct-login-needed says so" {
+  touch "$HOME/.ct-autostart"
+  mktranscript "$HOME/dev/agent-one"
+  mktranscript "$HOME/dev/agent-two"
+  echo 9 > "$BATS_TEST_TMPDIR/fails"
+  run env CLAUDE_STUB_FAILS="$BATS_TEST_TMPDIR/fails" CT_AUTOSTART_LOGIN_RETRY="0" "$REPO/bin/ct-autostart"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'claude -p ok' "$CLAUDE_STUB_LOG")" -eq 2 ]
+  [[ "$output" == *"Its agents start without a working login, so without Remote Control"* ]]
+  [[ "$output" == *"agent-one: started"* && "$output" == *"agent-two: started"* ]]
+  grep -q '^~/.claude: the claude.ai login failed at .*OAuth token has expired' "$HOME/.ct-login-needed"
+  ! grep -q secretsecret "$HOME/.ct-login-needed"
+  marker=$(ls "$HOME/.local/share/ct/login-failed/"*)
+  [ "$(head -1 "$marker")" = "$HOME/.claude" ]
+  grep -qxF claude-agent-one "$marker"
+  grep -qxF claude-agent-two "$marker"
+}
+
+@test "once the login works again, a loop pass restarts exactly the agents that started without it" {
+  touch "$HOME/.ct-autostart"
+  mktranscript "$HOME/dev/agent-one"
+  mktranscript "$HOME/dev/agent-two"
+  echo 9 > "$BATS_TEST_TMPDIR/fails"
+  run env CLAUDE_STUB_FAILS="$BATS_TEST_TMPDIR/fails" CT_AUTOSTART_LOGIN_RETRY="0" "$REPO/bin/ct-autostart"
+  # agent-two came up later by hand, after a /login in it: not on the list
+  marker=$(ls "$HOME/.local/share/ct/login-failed/"*)
+  grep -vxF claude-agent-two "$marker" > "$marker.new" && mv "$marker.new" "$marker"
+  : > "$TMUX_STUB_LOG"
+  echo 0 > "$BATS_TEST_TMPDIR/fails"                   # the login works now: the pass's recheck sees it
+  run env CLAUDE_STUB_FAILS="$BATS_TEST_TMPDIR/fails" CT_AUTOSTART_NO_WARMUP=1 CT_AUTOSTART_INTERVAL=0.1 \
+    timeout 2 "$REPO/bin/ct-autostart" --loop
+  [[ "$output" == *"credential login works again (~/.claude): restarting the agents that started without it"* ]]
+  [[ "$output" == *"claude-agent-one: stopped, to start again with Remote Control"* ]]
+  [[ "$output" != *"claude-agent-two: stopped"* ]]
+  grep -q 'kill-session -t =claude-agent-one' "$TMUX_STUB_LOG"
+  ! grep -q 'kill-session -t =claude-agent-two' "$TMUX_STUB_LOG"
+  grep -q -- 'new-session.*claude-agent-one ' "$TMUX_STUB_LOG"
+  [ ! -e "$HOME/.ct-login-needed" ]
+  [ -z "$(ls -A "$HOME/.local/share/ct/login-failed/")" ]
 }

@@ -873,3 +873,14 @@ ran_on() { # workspace, session-id, querySource, model, effort: append one api-r
   run run_ct "$HOME/dev/agent-alpha" -- --help
   grep -q 'new-session' "$TMUX_STUB_LOG"
 }
+
+@test "while ct-autostart reports a failed Claude login, ct warns whoever starts an agent" {
+  echo "~/.claude: the claude.ai login failed at 2026-11-25T01:08:12+00:00: OAuth token has expired." > "$HOME/.ct-login-needed"
+  run run_ct "$HOME/dev/agent-alpha"
+  [[ $status -eq 0 ]]
+  [[ $output == *"WARNING: a Claude login is not working, so agents started now get no Remote Control"* ]]
+  [[ $output == *"  ~/.claude: the claude.ai login failed at 2026-11-25T01:08:12+00:00"* ]]
+  rm "$HOME/.ct-login-needed"
+  run run_ct "$HOME/dev/agent-alpha"
+  [[ $output != *"WARNING: a Claude login"* ]]
+}

@@ -21,6 +21,12 @@
 # logs a WARNING when it is blank or waiting at a prompt: a session stuck at a
 # trust, MCP or effort dialog looks perfectly healthy to every process check.
 #
+# Before the agents start, one Claude call per login (the warm-up). A login
+# that fails is tried again for about half an hour (CT_AUTOSTART_LOGIN_RETRY);
+# meanwhile ~/.ct-login-needed says so, and `ct` prints it. If it never works,
+# the agents start anyway, without Remote Control, and the first --loop pass
+# that finds the login working restarts them so they get it.
+#
 # Workspaces are the directories under ~/dev matching CT_AUTOSTART_GLOB
 # (default agent-*; set it to * for plainly named workspaces).
 #
@@ -400,6 +406,98 @@ has_login() { # config dir -> true when it holds a claude.ai login
   command -v jq >/dev/null 2>&1 &&
     [[ $(jq -r '.oauthAccount.accountUuid // empty' "$state" 2>/dev/null) != "" ]]
 }
+# A failed warm-up is no longer waved through. Twice (2026-11-18 and 11-25,
+# both just after a 01:07 restart) it failed, the log said "continuing
+# anyway", and every agent started on a login that did not work at that
+# moment. Claude tries Remote Control once, at launch, so not one of them got
+# it, and none did when the login worked again. So now:
+#   - a failed warm-up is tried again, waiting longer each time
+#     (CT_AUTOSTART_LOGIN_RETRY, seconds; about half an hour in all), since a
+#     refresh that fails just after boot usually works a minute later;
+#   - while it fails, ~/.ct-login-needed says which login and what to do, and
+#     `ct` prints it at every start;
+#   - if it still fails, the agents start anyway, as before, and are written
+#     down; every --loop pass tries that login once more, and once it works,
+#     stops and starts exactly those agents again, so they get Remote Control.
+login_state="$HOME/.local/share/ct/login-failed"
+login_needed="$HOME/.ct-login-needed"
+warm_once() { # config dir -> 0 when a one-line prompt runs; sets warm_err
+  local out
+  if [[ $1 == "$HOME/.claude" ]]; then
+    out=$(env -u CLAUDE_CONFIG_DIR timeout 90 claude -p 'ok' 2>&1) && return 0
+  else
+    out=$(CLAUDE_CONFIG_DIR="$1" timeout 90 claude -p 'ok' 2>&1) && return 0
+  fi
+  # what Claude said, for the log: its first line, no token, kept short
+  warm_err=$(grep -m1 -v '^[[:space:]]*$' <<<"$out" | sed -E 's/sk-ant-[A-Za-z0-9_-]+/<redacted>/g' | cut -c1-160)
+  [[ -n $warm_err ]] || warm_err="no output"
+  return 1
+}
+login_key() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '-'; }
+need_login() { # config dir, label, error -> say it, in ~/.ct-login-needed
+  local line
+  line="$2: the claude.ai login failed at $(date -Is): $3. Sign in (/login in one of its agents, or CLAUDE_CONFIG_DIR=$1 claude /login); ct-autostart's next pass then restarts its agents, so they get Remote Control."
+  { grep -vF -- "$2: " "$login_needed" 2>/dev/null; echo "$line"; } > "$login_needed.tmp" && mv "$login_needed.tmp" "$login_needed"
+}
+login_works() { # config dir, label -> forget that it failed
+  rm -f "$login_state/$(login_key "$1")"
+  [[ -f $login_needed ]] || return 0
+  grep -vF -- "$2: " "$login_needed" > "$login_needed.tmp" || true
+  if [[ -s $login_needed.tmp ]]; then mv "$login_needed.tmp" "$login_needed"; else rm -f "$login_needed.tmp" "$login_needed"; fi
+}
+warm_up() { # config dir, label -> 0 once a prompt runs, 1 when every try failed
+  local d delays tries=0
+  read -r -a delays <<<"${CT_AUTOSTART_LOGIN_RETRY:-30 60 120 300 600 900}"
+  while :; do
+    warm_once "$1" && { log "credential warm-up ok ($2)"; login_works "$1" "$2"; return 0; }
+    need_login "$1" "$2" "$warm_err"
+    if (( tries >= ${#delays[@]} )); then
+      log "credential warm-up failed ($2): $warm_err. Its agents start without a working login, so without Remote Control; see ~/.ct-login-needed. Each --loop pass tries again and restarts them once it works."
+      mkdir -p "$login_state"; printf '%s\n' "$1" > "$login_state/$(login_key "$1")"
+      return 1
+    fi
+    d=${delays[$tries]}; tries=$((tries+1))
+    log "credential warm-up failed ($2): $warm_err — trying again in ${d}s ($tries of ${#delays[@]})"
+    sleep "$d"
+  done
+}
+# After a round: write down the running agents of a config whose login failed,
+# so the pass that sees it work knows whom to restart.
+note_unlinked() {
+  local f cfg u a _port name lbl _display dir _sid us=()
+  [[ -d $login_state ]] || return 0
+  mapfile -t us < <(units)
+  for f in "$login_state"/*; do
+    [[ -f $f ]] || continue
+    cfg=$(head -1 "$f")
+    for u in "${us[@]}"; do
+      IFS=$US read -r a _port name lbl _display dir _sid <<<"$u"
+      [[ $a == claude && $(claude_dir "$dir") == "$cfg" ]] || continue
+      tmux has-session -t "=$name" 2>/dev/null || continue
+      grep -qxF -- "$name" "$f" || echo "$name" >> "$f"
+    done
+  done
+}
+# In a --loop pass: one more try for each login that failed; when it works,
+# stop the agents that started without it (never the session running this),
+# and the round that follows starts them again.
+recheck_logins() {
+  local f cfg label self="" name
+  [[ -d $login_state ]] || return 0
+  if [[ -n "${TMUX:-}" ]]; then self="$(tmux display-message -p '#{session_name}' 2>/dev/null || true)"; fi
+  for f in "$login_state"/*; do
+    [[ -f $f ]] || continue
+    cfg=$(head -1 "$f"); label="${cfg/#$HOME/\~}"
+    warm_once "$cfg" || { need_login "$cfg" "$label" "$warm_err"; continue; }
+    log "credential login works again ($label): restarting the agents that started without it"
+    while IFS= read -r name; do
+      [[ -n $name ]] || continue
+      if [[ $name == "$self" ]]; then log "$name: this command runs inside it — leaving it alone"; continue; fi
+      tmux kill-session -t "=$name" 2>/dev/null && log "$name: stopped, to start again with Remote Control"
+    done < <(tail -n +2 "$f")
+    login_works "$cfg" "$label"
+  done
+}
 if [[ -z "${CT_AUTOSTART_NO_WARMUP:-}" ]]; then
   while IFS= read -r cfg; do
     [[ -n $cfg ]] || continue
@@ -407,21 +505,13 @@ if [[ -z "${CT_AUTOSTART_NO_WARMUP:-}" ]]; then
     if [[ $cfg != "$HOME/.claude" ]] && ! has_login "$cfg"; then
       log "credential warm-up: $label has no claude.ai login (key helper or none) — skipped"; continue
     fi
-    # The machine's ~/.claude takes no CLAUDE_CONFIG_DIR: that is how it was
-    # warmed before profiles, and how its agents run.
-    if [[ $cfg == "$HOME/.claude" ]]; then
-      env -u CLAUDE_CONFIG_DIR timeout 90 claude -p 'ok' >/dev/null 2>&1 && r=ok || r=failed
-    else
-      CLAUDE_CONFIG_DIR="$cfg" timeout 90 claude -p 'ok' >/dev/null 2>&1 && r=ok || r=failed
-    fi
-    if [[ $r == ok ]]; then log "credential warm-up ok ($label)"
-    else log "credential warm-up failed ($label, continuing anyway)"; fi
+    warm_up "$cfg" "$label" || true
   done < <(claude_configs)
 fi
 
 case "$mode" in
-  once)    run_round ;;
-  restart) stop_managed; run_round ;;
+  once)    run_round; rc=$?; note_unlinked; exit $rc ;;
+  restart) stop_managed; run_round; rc=$?; note_unlinked; exit $rc ;;
   loop)
     interval="${CT_AUTOSTART_INTERVAL:-300}"
     log "looping every ${interval}s (touch ~/.ct-noautostart to stop)"
@@ -430,8 +520,10 @@ case "$mode" in
       if [[ -e "$HOME/.ct-noautostart" ]]; then
         log "disabled by ~/.ct-noautostart — stopping the loop"; exit 0
       fi
+      recheck_logins
       # A failed start is already logged; the loop must outlive it.
       run_round || true
+      note_unlinked
       sleep "$interval"
     done ;;
 esac
