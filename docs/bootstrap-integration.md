@@ -188,8 +188,10 @@ An OpenCode session is checked over HTTP instead of by its screen: the shared se
 a TUI. A server that doesn't answer is a `WARNING` too, and the session is not killed. A session whose
 process has died is gone from tmux, and the next pass (`--loop`) starts it again, as for Claude.
 
-Workspaces are discovered as `~/dev/agent-*` by default. If your site names them
-plainly (`~/dev/billing`, `~/dev/billing-api`), set `CT_AUTOSTART_GLOB='*'`;
+A workspace is any directory under `~/dev` that ct has launched an agent in (its record, in
+`~/.local/share/ct/agents/`), whatever its name, and every one matching `CT_AUTOSTART_GLOB`
+(default `agent-*`), so a workspace whose agent predates the record still comes back. A site with
+plainly named workspaces that ct never launched (`~/dev/billing`) sets `CT_AUTOSTART_GLOB='*'`;
 dot-dirs such as `.gitcache/` are never treated as workspaces.
 
 If your image lacks tmux at boot, pre-cache its .deb closure on the home

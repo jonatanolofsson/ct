@@ -77,7 +77,7 @@ setup() {
   [ "$(grep -c "claude -p ok \[config=$HOME/dev/.profiles/acme/claude\]" "$CLAUDE_STUB_LOG")" -eq 1 ]
   [ "$(grep -c 'claude -p ok \[config=~/.claude\]' "$CLAUDE_STUB_LOG")" -eq 1 ]   # agent-four
   ! grep -q "config=$HOME/dev/.profiles/gw" "$CLAUDE_STUB_LOG"
-  [[ "$output" == *"gw/claude has no claude.ai login"*"skipped"* ]]
+  [[ "$output" == *"gw/claude has no claude.ai login and is no gateway profile"*"skipped"* ]]
 }
 
 @test "summary line reports counts and exit reflects failures" {
@@ -87,7 +87,7 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
-@test "default discovery is agent-* only" {
+@test "without a record, default discovery is agent-* only" {
   touch "$HOME/.ct-autostart"
   mkdir -p "$HOME/dev/plain"; mktranscript "$HOME/dev/plain"; mktranscript "$HOME/dev/agent-one"
   run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
@@ -503,4 +503,43 @@ mkpin() { # name session-id dir
   grep -q -- 'new-session.*claude-agent-one ' "$TMUX_STUB_LOG"
   [ ! -e "$HOME/.ct-login-needed" ]
   [ -z "$(ls -A "$HOME/.local/share/ct/login-failed/")" ]
+}
+
+@test "a workspace ct has a record for comes back whatever its name, without any glob" {
+  touch "$HOME/.ct-autostart"
+  mkdir -p "$HOME/dev/plain" "$HOME/dev/gone" "$HOME/.local/share/ct/agents"
+  mktranscript "$HOME/dev/plain"
+  echo claude > "$HOME/.local/share/ct/agents/plain"
+  echo claude > "$HOME/.local/share/ct/agents/gone"; rmdir "$HOME/dev/gone"   # a record left by a deleted workspace
+  echo claude > "$HOME/.local/share/ct/agents/agent-one"; mktranscript "$HOME/dev/agent-one"   # both record and glob: once
+  run env CT_AUTOSTART_NO_WARMUP=1 "$REPO/bin/ct-autostart"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"plain: started"* ]]
+  [[ "$output" != *"gone"* ]]
+  [ "$(grep -c -- 'new-session -d -s claude-agent-one ' "$TMUX_STUB_LOG")" -eq 1 ]
+}
+
+@test "a gateway profile is warmed up once, and a failing gateway is said but restarts nothing" {
+  touch "$HOME/.ct-autostart"
+  for ws in agent-one agent-two; do printf 'ct_profile=gw\n' > "$HOME/dev/$ws/.envrc"; done
+  mkdir -p "$HOME/dev/.profiles/gw/claude"
+  echo '{"ct_profile_kind":"gateway"}' > "$HOME/dev/.profiles/gw/claude/settings.json"
+  mktranscript "$HOME/dev/agent-one"
+  key=$(printf '%s' "$HOME/dev/agent-one" | tr -c 'A-Za-z0-9' '-')
+  mkdir -p "$HOME/dev/.profiles/gw/claude/projects"; mv "$HOME/.claude/projects/$key" "$HOME/dev/.profiles/gw/claude/projects/"
+  echo 9 > "$BATS_TEST_TMPDIR/fails"
+  run env CLAUDE_STUB_FAILS="$BATS_TEST_TMPDIR/fails" CT_AUTOSTART_LOGIN_RETRY="0 0" "$REPO/bin/ct-autostart"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c "claude -p ok \[config=$HOME/dev/.profiles/gw/claude\]" "$CLAUDE_STUB_LOG")" -eq 1 ]   # one try, no retries
+  [[ "$output" == *"gateway warm-up failed (~/dev/.profiles/gw/claude)"* ]]
+  [[ "$output" == *"agent-one: started"* ]]
+  grep -q '^~/dev/.profiles/gw/claude: its gateway failed at .*They need no restart' "$HOME/.ct-login-needed"
+  [ ! -e "$HOME/.local/share/ct/login-failed" ] || [ -z "$(ls -A "$HOME/.local/share/ct/login-failed")" ]
+  # the loop's pass finds it working: the line goes, and no agent is stopped
+  echo 0 > "$BATS_TEST_TMPDIR/fails"; : > "$TMUX_STUB_LOG"
+  run env CLAUDE_STUB_FAILS="$BATS_TEST_TMPDIR/fails" CT_AUTOSTART_NO_WARMUP=1 CT_AUTOSTART_INTERVAL=0.1 \
+    timeout 2 "$REPO/bin/ct-autostart" --loop
+  [[ "$output" == *"gateway works again (~/dev/.profiles/gw/claude)"* ]]
+  [ ! -e "$HOME/.ct-login-needed" ]
+  ! grep -q kill-session "$TMUX_STUB_LOG"
 }
