@@ -27,8 +27,11 @@
 # the agents start anyway, without Remote Control, and the first --loop pass
 # that finds the login working restarts them so they get it.
 #
-# Workspaces are the directories under ~/dev matching CT_AUTOSTART_GLOB
-# (default agent-*; set it to * for plainly named workspaces).
+# Workspaces are the directories under ~/dev that ct has a record for (it writes
+# one whenever it launches an agent there), whatever their name, and those
+# matching CT_AUTOSTART_GLOB (default agent-*; * for plainly named ones ct never
+# launched). A gateway profile's key is warmed up too, and a failure announced.
+
 #
 # No `set -e`: one bad workspace must not stop the other eleven.
 set -uo pipefail
@@ -123,20 +126,27 @@ fi
 tmux_ok || { log "no working tmux — cannot start any session, giving up"; exit 1; }
 log "tmux ready: $(tmux -V)"
 
-# Which directories under ~/dev are workspaces. The default keeps the agent-*
-# naming; a site that names workspaces plainly (hus, mgb-ekonomi) sets
-# CT_AUTOSTART_GLOB='*'. Dot-dirs are never workspaces — .gitcache/ lives here —
-# and bash globs skip them anyway, but the explicit check survives `dotglob`.
+# Which directories under ~/dev are workspaces: every one ct has a record for
+# (it writes one whenever it launches an agent there), so a workspace needs no
+# particular name; and every one CT_AUTOSTART_GLOB matches (default agent-*),
+# so a workspace whose agent predates the record still comes back. A site that
+# names workspaces plainly and has some that ct never launched sets it to '*'.
+# Dot-dirs are never workspaces — .gitcache/ and .profiles/ live here — and
+# bash globs skip them anyway, but the explicit check survives `dotglob`.
 workspaces() {
-  local ws
-  # The glob must stay unquoted so it expands.
-  # shellcheck disable=SC2231
-  for ws in "$HOME"/dev/${CT_AUTOSTART_GLOB:-agent-*}/; do
-    ws=${ws%/}
+  local ws f
+  {
+    # The glob must stay unquoted so it expands.
+    # shellcheck disable=SC2231
+    for ws in "$HOME"/dev/${CT_AUTOSTART_GLOB:-agent-*}/; do printf '%s\n' "${ws%/}"; done
+    for f in "$records"/*; do
+      [[ -f $f ]] && printf '%s\n' "$HOME/dev/${f##*/}"
+    done
+  } | while IFS= read -r ws; do
     [[ -d $ws ]] || continue
     [[ ${ws##*/} == .* ]] && continue
     printf '%s\n' "$ws"
-  done
+  done | awk '!seen[$0]++'
 }
 
 # The workspace's name in session names and in ct's record. Must match ct's own
@@ -420,6 +430,23 @@ has_login() { # config dir -> true when it holds a claude.ai login
 #     down; every --loop pass tries that login once more, and once it works,
 #     stops and starts exactly those agents again, so they get Remote Control.
 login_state="$HOME/.local/share/ct/login-failed"
+# A gateway profile (ct-profile new <name> gateway) has no claude.ai login and
+# no Remote Control, but a key its apiKeyHelper reads, and that can fail too.
+# Its warm-up is one try: nothing is lost at launch, since an agent's next
+# request works once the gateway does. A failure is said in ~/.ct-login-needed
+# and checked again by each --loop pass; nothing is restarted for it.
+gateway_state="$HOME/.local/share/ct/gateway-failed"
+is_gateway() { # config dir
+  command -v jq >/dev/null 2>&1 &&
+    jq -e '.ct_profile_kind == "gateway" or .ct_profile_kind == "bedrock"' "$1/settings.json" >/dev/null 2>&1
+}
+warm_gateway() { # config dir, label
+  if warm_once "$1"; then log "gateway warm-up ok ($2)"; login_works "$1" "$2"; return 0; fi
+  log "gateway warm-up failed ($2): $warm_err. Its agents' requests fail until it works; see ~/.ct-login-needed."
+  need_login "$1" "$2" "$warm_err" gateway
+  mkdir -p "$gateway_state"; printf '%s\n' "$1" > "$gateway_state/$(login_key "$1")"
+  return 1
+}
 login_needed="$HOME/.ct-login-needed"
 warm_once() { # config dir -> 0 when a one-line prompt runs; sets warm_err
   local out
@@ -434,13 +461,17 @@ warm_once() { # config dir -> 0 when a one-line prompt runs; sets warm_err
   return 1
 }
 login_key() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '-'; }
-need_login() { # config dir, label, error -> say it, in ~/.ct-login-needed
+need_login() { # config dir, label, error [gateway] -> say it, in ~/.ct-login-needed
   local line
-  line="$2: the claude.ai login failed at $(date -Is): $3. Sign in (/login in one of its agents, or CLAUDE_CONFIG_DIR=$1 claude /login); ct-autostart's next pass then restarts its agents, so they get Remote Control."
+  if [[ ${4:-} == gateway ]]; then
+    line="$2: its gateway failed at $(date -Is): $3. Its agents' requests fail until it works: check the key its apiKeyHelper reads, or the gateway itself. They need no restart; ct-autostart's next pass checks it again."
+  else
+    line="$2: the claude.ai login failed at $(date -Is): $3. Sign in (/login in one of its agents, or CLAUDE_CONFIG_DIR=$1 claude /login); ct-autostart's next pass then restarts its agents, so they get Remote Control."
+  fi
   { grep -vF -- "$2: " "$login_needed" 2>/dev/null; echo "$line"; } > "$login_needed.tmp" && mv "$login_needed.tmp" "$login_needed"
 }
 login_works() { # config dir, label -> forget that it failed
-  rm -f "$login_state/$(login_key "$1")"
+  rm -f "$login_state/$(login_key "$1")" "$gateway_state/$(login_key "$1")"
   [[ -f $login_needed ]] || return 0
   grep -vF -- "$2: " "$login_needed" > "$login_needed.tmp" || true
   if [[ -s $login_needed.tmp ]]; then mv "$login_needed.tmp" "$login_needed"; else rm -f "$login_needed.tmp" "$login_needed"; fi
@@ -483,6 +514,12 @@ note_unlinked() {
 # and the round that follows starts them again.
 recheck_logins() {
   local f cfg label self="" name
+  for f in "$gateway_state"/*; do
+    [[ -f $f ]] || continue
+    cfg=$(head -1 "$f"); label="${cfg/#$HOME/\~}"
+    if warm_once "$cfg"; then log "gateway works again ($label)"; login_works "$cfg" "$label"
+    else need_login "$cfg" "$label" "$warm_err" gateway; fi
+  done
   [[ -d $login_state ]] || return 0
   if [[ -n "${TMUX:-}" ]]; then self="$(tmux display-message -p '#{session_name}' 2>/dev/null || true)"; fi
   for f in "$login_state"/*; do
@@ -503,7 +540,8 @@ if [[ -z "${CT_AUTOSTART_NO_WARMUP:-}" ]]; then
     [[ -n $cfg ]] || continue
     label="${cfg/#$HOME/\~}"
     if [[ $cfg != "$HOME/.claude" ]] && ! has_login "$cfg"; then
-      log "credential warm-up: $label has no claude.ai login (key helper or none) — skipped"; continue
+      if is_gateway "$cfg"; then warm_gateway "$cfg" "$label" || true; continue; fi
+      log "credential warm-up: $label has no claude.ai login and is no gateway profile — skipped"; continue
     fi
     warm_up "$cfg" "$label" || true
   done < <(claude_configs)
