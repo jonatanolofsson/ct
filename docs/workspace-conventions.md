@@ -197,19 +197,19 @@ is set (an older `.envrc` lacks the line: add `if [[ -n $ct_profile ]]; then exp
 CLAUDE_CONFIG_DIR="$logins/claude"; fi` after the gcloud lines). Without a profile, Claude keeps the machine's
 `~/.claude`, as before. ct and ct-autostart look for a workspace's conversations in the same place.
 
-    ct-profile claude <name>             # its own claude.ai login: sign in once with `claude /login`
-    ct-profile claude <name> bedrock     # the site's backend, from $CT_BEDROCK_SETTINGS: no login
-    ct-profile move <workspace> <name>   # copy the workspace's conversations, memory and uploaded files into it
-    ct-profile move <workspace> <name> --own-accounts   # ...and let Remote Control show their history
-    ct-profile move <workspace> <name> --from <profile> # from another profile instead of ~/.claude
+    ct-profile new <name>                     # a claude.ai subscription: sign it in once (`claude auth login`)
+    ct-profile new <name> gateway             # the site's gateway, from $CT_GATEWAY_SETTINGS: no login
+    ct-profile transfer <workspace> <name>    # move the workspace's agent onto it, conversations and all
 
 A new profile starts from the machine's `~/.claude/settings.json` (hooks, permissions, `plansDirectory`) and links
-its skills, agents, commands and plugins; it never copies a login. A conversation copied into a profile resumes
-there with its whole history, on the profile's backend. The files the person attached to it (`uploads/`) come along,
-and the paths in the conversation are pointed at the copies, so the agent can open them again.
+its skills, agents, commands and plugins; it never copies a login.
 
-**Move with the agent stopped:** `touch ~/.ct-noautostart`, `tmux kill-session -t =claude-<workspace>`, then
-move, then `rm ~/.ct-noautostart`. `move` refuses while the agent runs, because the copy would miss its last turns.
+**`transfer` moves an agent, in one step.** It stops the agent (and says "mid-turn, try again" rather than stop
+one that is working), brings its conversations, memory, attached files and `/rewind` checkpoints along, points the
+workspace's `.envrc` at the profile, and starts the agent again. The workspace may come from the machine's
+`~/.claude` or from another profile. Only Claude moves: every other login the `.envrc` sets (gcloud and the rest)
+stays where it was, pinned in a marked block, and the old `.envrc` is kept in `.profiles/.transfer-backups/`. The
+conversations stay where they were too, until the person is sure.
 
 **Remote Control belongs to a claude.ai account.** A conversation records the account it ran under, and when it
 resumes under another one Claude Code takes that as "this conversation names another sign-in": the remote session
@@ -217,40 +217,30 @@ opens without its history or its name, on every later start too, and `/rename` d
 row carry the old account: `bridge-session` (the remote session it was linked to), `session-owner` (its account
 and organization), the `credential_org` attachments (the organization each turn was sent with) and the
 `compact_boundary` rows of a conversation that has been compacted (`preCompactOrganizations`), in the main
-transcript and in its subagents' transcripts alike. When the profile's account is also the person's, move with
-`--own-accounts`, in this order:
-
-1. create the profile and **sign it in first** (`CLAUDE_CONFIG_DIR=<root>/.profiles/<name>/claude claude auth
-   login`, which prints a link to open): `--own-accounts` refuses a profile without a login, because it writes the
-   profile's organization into the copy;
-2. stop the agent, then `ct-profile move <workspace> <name> --own-accounts` (add `--from <profile>` when the
-   workspace already lives in a profile): each conversation is copied under a new id, without the first two kinds
-   of row and with every `credential_org` and `preCompactOrganizations` naming the profile's organization, its
-   subagents included;
-3. set `ct_profile=<name>` in the workspace `.envrc`, `direnv allow` it, and let the agent start.
-
-It then comes up as a new remote session with its whole history and its name, under the profile's account. The
-old remote sessions stay under the old account; archive them there. Don't use it to move a conversation into
-someone else's account: this is the guard that keeps one person's history out of another's.
+transcript and in its subagents' transcripts alike. So a transfer to a profile with a login of its own **relinks**
+each conversation: it is copied under a new id, without the first two kinds of row and with every organization
+naming the profile's own. It then comes up as a new remote session with its whole history and its name, under that
+account; the old remote sessions stay under the old account, to archive there. That is why the profile must be
+**signed in first** (`CLAUDE_CONFIG_DIR=<root>/.profiles/<name>/claude claude auth login`, which prints a link to
+open): `transfer` refuses a subscription profile without a login. Transfer only between one person's own accounts:
+relinking hands a conversation's whole history to the target account.
 
 **A long conversation comes up empty all the same.** Before Claude Code back-fills a new remote session it scans
 the transcript for another account's rows, and it stops after 100 000 lines. A longer transcript has its history
 withheld, with no message saying so. Most of the length is rows Claude Code appends again on every turn (the
-title, the agent name, the mode, the last prompt), and `--own-accounts` keeps only the last of each: that took
-one conversation from 113 000 lines to 79 000 without touching a message. If a transcript is still over the limit
-afterwards, the move says so. The back-fill itself is capped by Claude Code at the last 200 events.
+title, the agent name, the mode, the last prompt), and relinking keeps only the last of each: that took one
+conversation from 113 000 lines to 79 000 without touching a message. If a transcript is still over the limit
+afterwards, the transfer says so. The back-fill itself is capped by Claude Code at the last 200 events.
 
-**When a subscription runs out of usage, its agents can move to another.** `ct-profile switch <workspace>
-<profile>` moves a running agent onto that profile's Claude login, with its conversation, memory and Remote Control
-history (`--own-accounts` from the profile it was on), and starts it again. Only Claude moves: every other login the
-workspace's `.envrc` sets stays where it was, pinned in a marked block. A site that runs several subscriptions gives
-each a **profile manager**, an agent in `<profile>-manager` made by `ct-manager init <profile>`. It watches for a
-subscription that runs out and tells the person, or moves agents itself for a pair the person has armed. Its brief is
-`docs/profile-managers.md`; the site's policy (order, who may run where, groups that move together across hosts) is
-`<root>/.profiles/managers.conf`.
+**A gateway profile has no Remote Control.** Claude Code offers Remote Control only through `api.anthropic.com`,
+so an agent on a gateway profile is reached in its terminal, or through an agent that is on Remote Control. Its
+conversations are copied as they are, without relinking.
 
-**A workspace's name says who pays.** One ending in `-bedrock` uses a bedrock profile, and no other workspace
-does; ct warns at start when the two disagree.
+**When a subscription runs out of usage, its agents can move to another** with `ct-profile transfer`. A site that
+runs several subscriptions gives each a **profile manager**, an agent in `<profile>-manager` made by `ct-manager
+init <profile>`. It watches for a subscription that runs out and tells the person, or moves agents itself for a
+pair the person has armed. Its brief is `docs/profile-managers.md`; the site's policy (order, who may run where,
+groups that move together across hosts) is `<root>/.profiles/managers.conf`.
 
 ### Check or set your workspace's profile — you can do this yourself
 Which profile is a question of **identity**: workspaces that work as the same accounts (one company, one person's

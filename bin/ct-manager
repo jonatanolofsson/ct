@@ -11,7 +11,7 @@
 #                                     <group> moved to <profile>
 #
 # A profile is one Claude subscription (docs/workspace-conventions.md). When one
-# runs out of usage, its agents can move to another with `ct-profile switch`,
+# runs out of usage, its agents can move to another with `ct-profile transfer`,
 # which keeps their conversations, memory and Remote Control history. A profile
 # manager is an agent in a profile of its own that watches for that and moves
 # agents, on the person's word or, for pairs they have armed, on its own. Its
@@ -215,7 +215,7 @@ peers() {
 init() {
   local p="${1:-}" ws="${2:-}" brief cfg
   [[ -n $p ]] || die "usage: ct-manager init <profile> [<workspace>]"
-  [[ -d $root/.profiles/$p/claude ]] || die "no profile $p (ct-profile claude $p, and sign it in)"
+  [[ -d $root/.profiles/$p/claude ]] || die "no profile $p (ct-profile new $p, and sign it in)"
   ws="${ws:-$p-manager}"
   brief="$HOME/.local/share/ct/profile-managers.md"
   [[ -f $brief ]] || brief="$(dirname "$(readlink -f "$0")")/../docs/profile-managers.md"
